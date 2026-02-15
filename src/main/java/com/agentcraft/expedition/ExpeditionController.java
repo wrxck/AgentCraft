@@ -2,6 +2,7 @@ package com.agentcraft.expedition;
 
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.navigation.NavigationController;
+import com.agentcraft.npc.AgentEquipment;
 import com.agentcraft.npc.FakePlayer;
 import com.agentcraft.util.LocationUtil;
 import org.bukkit.Bukkit;
@@ -43,7 +44,8 @@ public class ExpeditionController {
     private ExpeditionState stateBeforeInterrupt;
     private NPCGear gear;
     private MacroNavigator macroNavigator;
-    private StaircaseMiner staircaseMiner;
+    private TunnelMiner tunnelMiner;
+    private BranchMiner branchMiner;
     private CaveExplorer caveExplorer;
     private ExpeditionCombatHandler combatHandler;
     private WaypointManager waypointManager;
@@ -81,15 +83,18 @@ public class ExpeditionController {
 
         gathered = 0;
 
+        // Switch main hand to pickaxe for mining
+        switchToPickaxe();
+
         if (category.isSurface()) {
             // Walk outward in a random direction, scanning while traveling
             Location goal = pickSurfaceGoal();
             macroNavigator.navigateTo(goal);
             state = ExpeditionState.TRAVELING_SURFACE;
         } else {
-            // Start digging down
-            staircaseMiner = new StaircaseMiner(agent, gear, category.getTargetY());
-            staircaseMiner.start();
+            // Start digging down with 3x3 tunnel
+            tunnelMiner = new TunnelMiner(agent, gear, category.getTargetY());
+            tunnelMiner.start();
             state = ExpeditionState.DESCENDING;
         }
 
@@ -121,6 +126,7 @@ public class ExpeditionController {
                     stateBeforeInterrupt = state;
                     if (result == ExpeditionCombatHandler.CombatResult.FIGHT) {
                         state = ExpeditionState.COMBAT;
+                        switchToSword();
                         if (combatHandler.getCurrentTarget() != null) {
                             reporter.reportCombat(
                                     combatHandler.getCurrentTarget().getType().name().toLowerCase(),
@@ -151,6 +157,7 @@ public class ExpeditionController {
             case DESCENDING -> tickDescending();
             case EXPLORING_CAVE -> tickExploringCave();
             case SEARCHING -> tickSearching();
+            case BRANCH_MINING -> tickBranchMining();
             case GATHERING -> tickGathering();
             case COMBAT -> tickCombat();
             case FLEEING -> tickFleeing();
@@ -170,7 +177,7 @@ public class ExpeditionController {
                 SURFACE_SCAN_RADIUS, SURFACE_SCAN_Y);
         if (found != null) {
             macroNavigator.cancel();
-            gatherBlockLoc = found;
+            gatherBlockLoc = found.clone();
             breakStage = -1;
             stageCooldown = 0;
             reporter.reportFoundMaterial(targetMaterial,
@@ -187,10 +194,10 @@ public class ExpeditionController {
     }
 
     private void tickDescending() {
-        staircaseMiner.tick();
+        tunnelMiner.tick();
 
-        if (staircaseMiner.isCaveFound()) {
-            Location caveLoc = staircaseMiner.getCaveLocation();
+        if (tunnelMiner.isCaveFound()) {
+            Location caveLoc = tunnelMiner.getCaveLocation();
             log("Cave found at " + caveLoc.getBlockX() + "," + caveLoc.getBlockY() + "," + caveLoc.getBlockZ());
             caveExplorer = new CaveExplorer(agent, targetMaterial, caveLoc);
             caveExplorer.start();
@@ -198,11 +205,13 @@ public class ExpeditionController {
             return;
         }
 
-        if (staircaseMiner.isArrived()) {
-            log("Reached target Y-level " + category.getTargetY());
-            state = ExpeditionState.SEARCHING;
-            searchNavArrived = false;
-            searchNavFailed = false;
+        if (tunnelMiner.isArrived()) {
+            log("Reached target Y-level " + category.getTargetY() + ", starting branch mining");
+            branchMiner = new BranchMiner(agent, gear, targetMaterial,
+                    tunnelMiner.getDirX(), tunnelMiner.getDirZ(),
+                    tunnelMiner.getPerpX(), tunnelMiner.getPerpZ());
+            branchMiner.start();
+            state = ExpeditionState.BRANCH_MINING;
         }
     }
 
@@ -213,7 +222,7 @@ public class ExpeditionController {
             Location found = caveExplorer.getTargetLocation();
             reporter.reportFoundMaterial(targetMaterial,
                     found.getBlockX(), found.getBlockY(), found.getBlockZ());
-            gatherBlockLoc = found;
+            gatherBlockLoc = found.clone();
             breakStage = -1;
             stageCooldown = 0;
             state = ExpeditionState.GATHERING;
@@ -228,6 +237,28 @@ public class ExpeditionController {
         }
     }
 
+    private void tickBranchMining() {
+        branchMiner.tick();
+
+        if (branchMiner.isFoundTarget()) {
+            Location found = branchMiner.getTargetLocation();
+            reporter.reportFoundMaterial(targetMaterial,
+                    found.getBlockX(), found.getBlockY(), found.getBlockZ());
+            gatherBlockLoc = found.clone();
+            breakStage = -1;
+            stageCooldown = 0;
+            state = ExpeditionState.GATHERING;
+            return;
+        }
+
+        if (branchMiner.isExhausted()) {
+            log("Branch mining exhausted, switching to searching");
+            state = ExpeditionState.SEARCHING;
+            searchNavArrived = false;
+            searchNavFailed = false;
+        }
+    }
+
     private void tickSearching() {
         // Scan around current location
         Location found = scanForMaterial(agent.getNpc().getLocation(),
@@ -236,7 +267,7 @@ public class ExpeditionController {
             agent.getBehaviorController().getNavigation().cancel();
             reporter.reportFoundMaterial(targetMaterial,
                     found.getBlockX(), found.getBlockY(), found.getBlockZ());
-            gatherBlockLoc = found;
+            gatherBlockLoc = found.clone();
             breakStage = -1;
             stageCooldown = 0;
             state = ExpeditionState.GATHERING;
@@ -265,7 +296,7 @@ public class ExpeditionController {
             Location found = scanForMaterial(agent.getNpc().getLocation(),
                     UNDERGROUND_SCAN_RADIUS, UNDERGROUND_SCAN_Y);
             if (found != null) {
-                gatherBlockLoc = found;
+                gatherBlockLoc = found.clone();
                 breakStage = -1;
                 stageCooldown = 0;
             } else {
@@ -362,6 +393,7 @@ public class ExpeditionController {
                 reporter.reportCombat(
                         combatHandler.getCurrentTarget().getType().name().toLowerCase(), true);
             }
+            switchToPickaxe();
             state = stateBeforeInterrupt != null ? stateBeforeInterrupt : ExpeditionState.SEARCHING;
             stateBeforeInterrupt = null;
         }
@@ -371,6 +403,7 @@ public class ExpeditionController {
         combatHandler.tick();
 
         if (combatHandler.isDone()) {
+            switchToPickaxe();
             state = stateBeforeInterrupt != null ? stateBeforeInterrupt : ExpeditionState.SEARCHING;
             stateBeforeInterrupt = null;
         }
@@ -451,6 +484,9 @@ public class ExpeditionController {
         double distance = waypointManager.getTotalDistanceTraveled();
         reporter.reportComplete(gathered, targetMaterial, distance);
 
+        // Switch back to sword (default held item)
+        switchToSword();
+
         // Drop gathered items at home
         for (int i = 0; i < gathered; i++) {
             Material mat = matchMaterial(targetMaterial);
@@ -462,6 +498,22 @@ public class ExpeditionController {
 
         cleanup();
         state = ExpeditionState.COMPLETED;
+    }
+
+    private void switchToPickaxe() {
+        AgentEquipment equip = agent.getNpc().getEquipment();
+        if (equip == null) return;
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            agent.getNpc().sendMainHand(viewer, equip.getPickaxe());
+        }
+    }
+
+    private void switchToSword() {
+        AgentEquipment equip = agent.getNpc().getEquipment();
+        if (equip == null) return;
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            agent.getNpc().sendMainHand(viewer, equip.getSword());
+        }
     }
 
     private void cleanup() {

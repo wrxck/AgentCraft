@@ -1,5 +1,5 @@
 name: AgentCraft
-version: 2.0.0
+version: 0.1.0-alpha
 main: com.agentcraft.AgentCraftPlugin
 api-version: '1.21'
 depend: [ProtocolLib]

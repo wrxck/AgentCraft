@@ -3,9 +3,9 @@ package com.agentcraft.expedition;
 public class NPCGear {
 
     private static final double MAX_HP = 20.0;
-    private static final double ARMOR_REDUCTION = 0.60;
-    private static final double SWORD_DAMAGE = 7.0;
-    private static final int MAX_PICKAXE_DURABILITY = 250;
+    private static final double ARMOR_REDUCTION = 0.80; // Diamond + Protection IV
+    private static final double SWORD_DAMAGE = 12.0;    // Diamond + Sharpness V
+    private static final int MAX_PICKAXE_DURABILITY = Integer.MAX_VALUE;
     private static final double FOOD_HEAL = 6.0;
     private static final double EAT_THRESHOLD = 10.0;
 
@@ -32,9 +32,7 @@ public class NPCGear {
     }
 
     public void usePickaxe() {
-        if (pickaxeDurability > 0) {
-            pickaxeDurability--;
-        }
+        // No-op: maxed diamond pickaxe with Unbreaking III is effectively infinite
     }
 
     public boolean isDead() {

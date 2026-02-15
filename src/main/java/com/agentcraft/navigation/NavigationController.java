@@ -8,6 +8,7 @@ import org.bukkit.Location;
 import org.bukkit.entity.Player;
 
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 public class NavigationController {
 
@@ -15,6 +16,16 @@ public class NavigationController {
     private static final double WAYPOINT_REACH_DIST = 0.5;
     private static final long REPATH_COOLDOWN_MS = 2000;
     private static final double REPATH_MOVE_THRESHOLD = 3.0;
+
+    // Natural movement constants
+    private static final double WOBBLE_AMPLITUDE = 0.012;
+    private static final int ARM_SWING_MIN = 6;
+    private static final int ARM_SWING_MAX = 14;
+    private static final int GLANCE_MIN_TICKS = 10;  // 0.5s
+    private static final int GLANCE_MAX_TICKS = 30;  // 1.5s
+    private static final int GLANCE_COOLDOWN_MIN = 60;
+    private static final int GLANCE_COOLDOWN_MAX = 200;
+    private static final float GLANCE_YAW_MAX = 10.0f;
 
     public enum State { IDLE, COMPUTING, FOLLOWING, ARRIVED, FAILED }
 
@@ -28,6 +39,13 @@ public class NavigationController {
     private long lastRepathTime;
     private Runnable onArrival;
     private Runnable onFailed;
+
+    // Natural movement state
+    private int walkTick;
+    private int armSwingCooldown;
+    private int headGlanceCooldown;
+    private int glanceDuration;
+    private float glanceYawOffset;
 
     public NavigationController(AIAgent agent) {
         this.agent = agent;
@@ -67,6 +85,11 @@ public class NavigationController {
         goalLocation = null;
         onArrival = null;
         onFailed = null;
+        walkTick = 0;
+        armSwingCooldown = 0;
+        headGlanceCooldown = 0;
+        glanceDuration = 0;
+        glanceYawOffset = 0;
     }
 
     public boolean isNavigating() {
@@ -126,6 +149,7 @@ public class NavigationController {
             return;
         }
 
+        walkTick++;
         FakePlayer npc = agent.getNpc();
         Location current = npc.getLocation();
 
@@ -158,7 +182,7 @@ public class NavigationController {
         }
 
         // Move toward current waypoint
-        double moveX, moveY, moveZ;
+        double moveX, moveZ;
         if (distXZ > WALK_SPEED) {
             double scale = WALK_SPEED / distXZ;
             moveX = dx * scale;
@@ -168,7 +192,19 @@ public class NavigationController {
             moveZ = dz;
         }
 
+        // Sinusoidal perpendicular wobble for natural-looking movement
+        double wobble = Math.sin(walkTick * 0.35) * WOBBLE_AMPLITUDE;
+        // Perpendicular vector: rotate (moveX, moveZ) by 90 degrees
+        double perpX = -moveZ;
+        double perpZ = moveX;
+        double perpLen = Math.sqrt(perpX * perpX + perpZ * perpZ);
+        if (perpLen > 0.001) {
+            moveX += (perpX / perpLen) * wobble;
+            moveZ += (perpZ / perpLen) * wobble;
+        }
+
         // Y movement - snap toward target Y
+        double moveY;
         if (Math.abs(dy) < 0.1) {
             moveY = 0;
         } else if (dy > 0) {
@@ -191,8 +227,28 @@ public class NavigationController {
         Location lookTarget = new Location(current.getWorld(), lookX, current.getY() + 1.0, lookZ);
         float[] yawPitch = LocationUtil.calculateYawPitch(current, lookTarget);
 
+        // Head glance: occasionally offset yaw while walking
+        if (glanceDuration > 0) {
+            yawPitch[0] += glanceYawOffset;
+            glanceDuration--;
+        } else if (--headGlanceCooldown <= 0) {
+            headGlanceCooldown = ThreadLocalRandom.current().nextInt(GLANCE_COOLDOWN_MIN, GLANCE_COOLDOWN_MAX + 1);
+            glanceDuration = ThreadLocalRandom.current().nextInt(GLANCE_MIN_TICKS, GLANCE_MAX_TICKS + 1);
+            glanceYawOffset = (ThreadLocalRandom.current().nextFloat() * 2 - 1) * GLANCE_YAW_MAX;
+        }
+
+        // Arm swing while walking
+        boolean swing = false;
+        if (--armSwingCooldown <= 0) {
+            armSwingCooldown = ThreadLocalRandom.current().nextInt(ARM_SWING_MIN, ARM_SWING_MAX + 1);
+            swing = true;
+        }
+
         for (Player player : Bukkit.getOnlinePlayers()) {
             npc.move(player, moveX, moveY, moveZ, yawPitch[0], yawPitch[1]);
+            if (swing) {
+                npc.swingArm(player);
+            }
         }
         npc.updatePosition(moveX, moveY, moveZ, yawPitch[0], yawPitch[1]);
     }

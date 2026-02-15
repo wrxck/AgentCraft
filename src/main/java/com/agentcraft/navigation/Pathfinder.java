@@ -17,8 +17,10 @@ public class Pathfinder {
     private static final int MAX_STEP_DOWN = 3;
 
     private static final int[][] DIRECTIONS = {
-            {1, 0}, {-1, 0}, {0, 1}, {0, -1} // N/S/E/W only - no diagonals
+            {1, 0}, {-1, 0}, {0, 1}, {0, -1},           // cardinal
+            {1, 1}, {1, -1}, {-1, 1}, {-1, -1}           // diagonal
     };
+    private static final double SQRT2 = Math.sqrt(2);
 
     private static final Set<Material> HAZARDS = EnumSet.of(
             Material.LAVA, Material.FIRE, Material.SOUL_FIRE,
@@ -85,9 +87,16 @@ public class Pathfinder {
             for (int[] dir : DIRECTIONS) {
                 int nx = current.x + dir[0];
                 int nz = current.z + dir[1];
+                boolean diagonal = dir[0] != 0 && dir[1] != 0;
 
                 // Chunk guard - skip unloaded chunks
                 if (!world.isChunkLoaded(nx >> 4, nz >> 4)) continue;
+
+                // Corner-cut prevention: for diagonal moves, both adjacent cardinals must be passable
+                if (diagonal) {
+                    if (findWalkableY(current.x + dir[0], current.y, current.z) == Integer.MIN_VALUE) continue;
+                    if (findWalkableY(current.x, current.y, current.z + dir[1]) == Integer.MIN_VALUE) continue;
+                }
 
                 // Find walkable Y at (nx, nz) relative to current.y
                 int ny = findWalkableY(nx, current.y, nz);
@@ -104,10 +113,10 @@ public class Pathfinder {
 
                 if (closedSet.contains(neighborPacked)) continue;
 
-                double moveCost = 1.0;
+                double moveCost = diagonal ? SQRT2 : 1.0;
                 // Water is walkable but costs more
                 Material feetMat = world.getBlockAt(nx, ny, nz).getType();
-                if (feetMat == Material.WATER) moveCost = 2.0;
+                if (feetMat == Material.WATER) moveCost *= 2.0;
                 // Vertical movement costs a bit more
                 if (stepUp > 0) moveCost += 0.5;
                 if (stepDown > 0) moveCost += 0.3 * stepDown;
@@ -170,8 +179,13 @@ public class Pathfinder {
     }
 
     private static double heuristic(PathNode a, PathNode b) {
-        // Manhattan distance - matches 4-directional movement
-        return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.z - b.z);
+        // Octile distance - admissible for 8-directional movement
+        int dx = Math.abs(a.x - b.x);
+        int dy = Math.abs(a.y - b.y);
+        int dz = Math.abs(a.z - b.z);
+        int dMin = Math.min(dx, dz);
+        int dMax = Math.max(dx, dz);
+        return (SQRT2 - 1) * dMin + dMax + dy;
     }
 
     private static List<PathNode> reconstructPath(PathNode end) {

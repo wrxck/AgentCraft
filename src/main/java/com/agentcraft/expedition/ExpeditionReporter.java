@@ -106,6 +106,7 @@ public class ExpeditionReporter {
             case DESCENDING -> "Descending";
             case EXPLORING_CAVE -> "Exploring cave";
             case SEARCHING -> "Searching";
+            case BRANCH_MINING -> "Branch mining";
             case GATHERING -> "Gathering";
             case COMBAT -> "Fighting";
             case FLEEING -> "Fleeing";

@@ -6,10 +6,12 @@ import com.comphenix.protocol.ProtocolManager;
 import com.comphenix.protocol.events.PacketContainer;
 import com.comphenix.protocol.wrappers.*;
 import com.comphenix.protocol.wrappers.BlockPosition;
+import com.comphenix.protocol.wrappers.Pair;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 
 import java.util.*;
@@ -29,6 +31,7 @@ public class FakePlayer {
 
     private Location location;
     private SkinData skinData;
+    private AgentEquipment equipment;
     private boolean spawned;
 
     public FakePlayer(Plugin plugin, String name, Location location) {
@@ -50,6 +53,14 @@ public class FakePlayer {
         }
     }
 
+    public void setEquipment(AgentEquipment equipment) {
+        this.equipment = equipment;
+    }
+
+    public AgentEquipment getEquipment() {
+        return equipment;
+    }
+
     public void spawn(Player viewer) {
         ProtocolManager pm = ProtocolLibrary.getProtocolManager();
 
@@ -65,10 +76,83 @@ public class FakePlayer {
         // 4. Head Rotation
         sendHeadRotation(viewer, pm, location.getYaw());
 
-        // 5. Remove from tab after delay (skin needs ~2 seconds to load)
+        // 5. Equipment
+        if (equipment != null) {
+            sendEquipment(viewer, pm);
+        }
+
+        // 6. Remove from tab after delay (skin needs ~2 seconds to load)
         Bukkit.getScheduler().runTaskLater(plugin, () -> sendPlayerInfoRemove(viewer, pm), 40L);
 
         this.spawned = true;
+    }
+
+    public void sendEquipment(Player viewer) {
+        ProtocolManager pm = ProtocolLibrary.getProtocolManager();
+        sendEquipment(viewer, pm);
+    }
+
+    private void sendEquipment(Player viewer, ProtocolManager pm) {
+        if (equipment == null) return;
+
+        List<Pair<EnumWrappers.ItemSlot, ItemStack>> slots = List.of(
+                new Pair<>(EnumWrappers.ItemSlot.MAINHAND, equipment.getMainHand()),
+                new Pair<>(EnumWrappers.ItemSlot.OFFHAND, new ItemStack(org.bukkit.Material.AIR)),
+                new Pair<>(EnumWrappers.ItemSlot.HEAD, equipment.getHelmet()),
+                new Pair<>(EnumWrappers.ItemSlot.CHEST, equipment.getChestplate()),
+                new Pair<>(EnumWrappers.ItemSlot.LEGS, equipment.getLeggings()),
+                new Pair<>(EnumWrappers.ItemSlot.FEET, equipment.getBoots())
+        );
+
+        PacketContainer packet = new PacketContainer(PacketType.Play.Server.ENTITY_EQUIPMENT);
+        packet.getIntegers().write(0, entityId);
+        packet.getSlotStackPairLists().write(0, slots);
+        pm.sendServerPacket(viewer, packet);
+    }
+
+    public void sendMainHand(Player viewer, ItemStack item) {
+        sendEquipmentSlot(viewer, EnumWrappers.ItemSlot.MAINHAND, item);
+    }
+
+    /**
+     * Send a single equipment slot update to a viewer.
+     */
+    public void sendEquipmentSlot(Player viewer, EnumWrappers.ItemSlot slot, ItemStack item) {
+        ProtocolManager pm = ProtocolLibrary.getProtocolManager();
+
+        List<Pair<EnumWrappers.ItemSlot, ItemStack>> slots = List.of(
+                new Pair<>(slot, item)
+        );
+
+        PacketContainer packet = new PacketContainer(PacketType.Play.Server.ENTITY_EQUIPMENT);
+        packet.getIntegers().write(0, entityId);
+        packet.getSlotStackPairLists().write(0, slots);
+        pm.sendServerPacket(viewer, packet);
+    }
+
+    /**
+     * Set sleeping pose via entity metadata.
+     * Uses metadata index 6 (Pose enum): 0=STANDING, 2=SLEEPING
+     */
+    public void setPose(Player viewer, boolean sleeping) {
+        ProtocolManager pm = ProtocolLibrary.getProtocolManager();
+
+        WrappedDataWatcher.Serializer byteSerializer = WrappedDataWatcher.Registry.get(Byte.class);
+
+        // Entity base metadata index 0: flags byte
+        // Bit 0x00 = normal (standing)
+        byte flags = (byte) 0x00;
+
+        // Pose is index 6, using EntityPose enum
+        // We use the byte serializer for the flags and handle pose separately
+        List<WrappedDataValue> values = new ArrayList<>();
+        values.add(new WrappedDataValue(0, byteSerializer, flags));
+        values.add(new WrappedDataValue(SKIN_LAYERS_INDEX, byteSerializer, SKIN_LAYERS_ALL));
+
+        PacketContainer packet = new PacketContainer(PacketType.Play.Server.ENTITY_METADATA);
+        packet.getIntegers().write(0, entityId);
+        packet.getDataValueCollectionModifier().write(0, values);
+        pm.sendServerPacket(viewer, packet);
     }
 
     public void despawn(Player viewer) {
@@ -79,6 +163,7 @@ public class FakePlayer {
 
         // Also remove from tab in case still listed
         sendPlayerInfoRemove(viewer, pm);
+        this.spawned = false;
     }
 
     public void move(Player viewer, double dx, double dy, double dz, float yaw, float pitch) {
@@ -225,9 +310,13 @@ public class FakePlayer {
     }
 
     private void sendPlayerInfoRemove(Player viewer, ProtocolManager pm) {
-        PacketContainer packet = new PacketContainer(PacketType.Play.Server.PLAYER_INFO_REMOVE);
-        packet.getUUIDLists().write(0, List.of(uuid));
-        pm.sendServerPacket(viewer, packet);
+        try {
+            PacketContainer packet = new PacketContainer(PacketType.Play.Server.PLAYER_INFO_REMOVE);
+            packet.getUUIDLists().write(0, List.of(uuid));
+            pm.sendServerPacket(viewer, packet);
+        } catch (Exception e) {
+            // Player may have disconnected between check and send
+        }
     }
 
     private void sendSpawnEntity(Player viewer, ProtocolManager pm) {

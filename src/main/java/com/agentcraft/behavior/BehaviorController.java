@@ -79,6 +79,7 @@ public class BehaviorController {
     private final AIAgent agent;
     private final Location homeLocation;
     private final NavigationController navigation;
+    private final AutonomousController autonomous;
 
     private BukkitRunnable tickTask;
     private Location wanderTarget;
@@ -112,16 +113,46 @@ public class BehaviorController {
     // Expedition
     private ExpeditionController activeExpedition;
 
+    // Walk wobble/swing for short-distance direct movement
+    private int walkSwingCooldown;
+    private int directWalkTick;
+
     public BehaviorController(AIAgent agent) {
         this.agent = agent;
         this.homeLocation = agent.getNpc().getLocation().clone();
         this.navigation = new NavigationController(agent);
         this.lastState = AgentState.IDLE;
         this.nextBehaviorTick = randomRange(IDLE_LOOK_MIN, IDLE_LOOK_MAX);
+
+        // Autonomous behavior from config
+        boolean autoEnabled = agent.getPlugin().getConfig().getBoolean("autonomous.enabled", true);
+        int autoInterval = agent.getPlugin().getConfig().getInt("autonomous.interval-seconds", 60);
+        int autoMaxTurns = agent.getPlugin().getConfig().getInt("autonomous.max-turns-per-cycle", 10);
+        this.autonomous = new AutonomousController(agent, autoEnabled, autoInterval, autoMaxTurns);
     }
 
     public NavigationController getNavigation() {
         return navigation;
+    }
+
+    public AutonomousController getAutonomous() {
+        return autonomous;
+    }
+
+    /**
+     * Check if the agent is busy with any sub-behavior.
+     */
+    public boolean isBusy() {
+        if (navigation.isNavigating()) return true;
+        if (agent.getActionQueue().isRunning()) return true;
+        if (activeExpedition != null) return true;
+        if (autonomous.isThinking()) return true;
+        if (wanderTarget != null) return true;
+        if (gatherTarget != null) return true;
+        if (followTarget != null) return true;
+        if (fleeTarget != null) return true;
+        if (giveTarget != null) return true;
+        return false;
     }
 
     public void start() {
@@ -146,6 +177,9 @@ public class BehaviorController {
     private void tick() {
         // Navigation must tick even during action queue (actions use navigation)
         navigation.tick();
+
+        // Autonomous think cycle
+        autonomous.tick();
 
         // Expedition takes over all behavior when active
         if (activeExpedition != null) {
@@ -355,6 +389,8 @@ public class BehaviorController {
 
     /**
      * Move at WALK_SPEED toward target. Returns true on arrival.
+     * For distances >3 blocks, delegates to NavigationController for A* pathfinding.
+     * For short distances, uses direct vector movement with wobble.
      */
     private boolean walkToward(Location target) {
         return walkToward(target, WALK_SPEED);
@@ -362,8 +398,44 @@ public class BehaviorController {
 
     /**
      * Move at given speed toward target. Returns true on arrival.
+     * Delegates to NavigationController for long distances (>3 blocks).
      */
     private boolean walkToward(Location target, double speed) {
+        FakePlayer npc = agent.getNpc();
+        Location current = npc.getLocation();
+        double distXZ = LocationUtil.distanceXZ(current, target);
+
+        if (distXZ <= 0.3) {
+            return true;
+        }
+
+        // For long distances, use A* pathfinding via NavigationController
+        if (distXZ > 3.0 && !navigation.isNavigating()) {
+            navigation.navigateTo(target);
+            return false;
+        }
+        if (navigation.isNavigating()) {
+            // Navigation is handling movement; check if arrived
+            if (navigation.getState() == NavigationController.State.ARRIVED
+                    || navigation.getState() == NavigationController.State.IDLE) {
+                return distXZ <= 0.3;
+            }
+            if (navigation.getState() == NavigationController.State.FAILED) {
+                // Fall through to direct movement as fallback
+                navigation.cancel();
+            } else {
+                return false; // still navigating
+            }
+        }
+
+        // Short-distance direct movement with wobble
+        return walkTowardDirect(target, speed);
+    }
+
+    /**
+     * Direct vector movement for short distances. Includes wobble and arm swing.
+     */
+    private boolean walkTowardDirect(Location target, double speed) {
         FakePlayer npc = agent.getNpc();
         Location current = npc.getLocation();
 
@@ -375,6 +447,8 @@ public class BehaviorController {
             return true;
         }
 
+        directWalkTick++;
+
         // Normalize and scale
         double scale = speed / distXZ;
         double moveX = dx * scale;
@@ -383,6 +457,16 @@ public class BehaviorController {
         // Clamp to remaining distance
         if (Math.abs(moveX) > Math.abs(dx)) moveX = dx;
         if (Math.abs(moveZ) > Math.abs(dz)) moveZ = dz;
+
+        // Sinusoidal perpendicular wobble
+        double wobble = Math.sin(directWalkTick * 0.35) * 0.012;
+        double perpX = -moveZ;
+        double perpZ = moveX;
+        double perpLen = Math.sqrt(perpX * perpX + perpZ * perpZ);
+        if (perpLen > 0.001) {
+            moveX += (perpX / perpLen) * wobble;
+            moveZ += (perpZ / perpLen) * wobble;
+        }
 
         // Find safe Y at destination
         Location nextPos = current.clone().add(moveX, 0, moveZ);
@@ -395,8 +479,18 @@ public class BehaviorController {
 
         float[] yawPitch = LocationUtil.calculateYawPitch(current, target);
 
+        // Arm swing while walking
+        boolean swing = false;
+        if (--walkSwingCooldown <= 0) {
+            walkSwingCooldown = ThreadLocalRandom.current().nextInt(6, 15);
+            swing = true;
+        }
+
         for (Player player : Bukkit.getOnlinePlayers()) {
             npc.move(player, moveX, moveY, moveZ, yawPitch[0], yawPitch[1]);
+            if (swing) {
+                npc.swingArm(player);
+            }
         }
         npc.updatePosition(moveX, moveY, moveZ, yawPitch[0], yawPitch[1]);
 
@@ -787,6 +881,37 @@ public class BehaviorController {
             if (stack.getType() == material) return true;
         }
         return false;
+    }
+
+    /**
+     * Count how many of a material are in inventory.
+     */
+    public int countInInventory(Material material) {
+        int total = 0;
+        for (ItemStack stack : inventory) {
+            if (stack.getType() == material) total += stack.getAmount();
+        }
+        return total;
+    }
+
+    /**
+     * Remove up to count of a material from inventory. Returns actual amount removed.
+     */
+    public int removeFromInventory(Material material, int count) {
+        int remaining = count;
+        Iterator<ItemStack> it = inventory.iterator();
+        while (it.hasNext() && remaining > 0) {
+            ItemStack stack = it.next();
+            if (stack.getType() != material) continue;
+            if (stack.getAmount() <= remaining) {
+                remaining -= stack.getAmount();
+                it.remove();
+            } else {
+                stack.setAmount(stack.getAmount() - remaining);
+                remaining = 0;
+            }
+        }
+        return count - remaining;
     }
 
     // --- AI-triggered actions ---

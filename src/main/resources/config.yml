@@ -31,12 +31,18 @@ rate-limit-refill-seconds: 60
 allowed-players: []
 
 # Default agent profile
-default-profile: fullstack
+default-profile: builder
 
 # Players whose chat is forwarded to NPCs for conversation (empty = nobody)
 chat-players:
   - "5X_Productions"
   - "1jakku"
+
+# LLM provider for NPC chat: "cli" (Claude Code CLI) or "api" (Anthropic HTTP API)
+llm-provider: "cli"
+
+# Anthropic API key (required if llm-provider is "api")
+anthropic-api-key: ""
 
 # Model for NPC conversations (haiku = fast, sonnet = smarter)
 chat-model: "haiku"
@@ -51,3 +57,14 @@ memory:
   qdrant-api-key: ""
   embeddings-host: "embeddings"
   embeddings-port: 8090
+
+# Autonomous NPC behavior (think independently when idle)
+autonomous:
+  enabled: true
+  interval-seconds: 60
+  max-turns-per-cycle: 10
+
+# Chunk force-loading (keep NPC chunks active when no players nearby)
+chunk-forcing:
+  enabled: true
+  radius: 1

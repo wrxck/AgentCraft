@@ -8,16 +8,18 @@ import org.bukkit.event.player.PlayerJoinEvent;
 public class PlayerJoinListener implements Listener {
 
     private final NPCTracker tracker;
+    private final org.bukkit.plugin.Plugin plugin;
 
-    public PlayerJoinListener(NPCTracker tracker) {
+    public PlayerJoinListener(NPCTracker tracker, org.bukkit.plugin.Plugin plugin) {
         this.tracker = tracker;
+        this.plugin = plugin;
     }
 
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         // Delay slightly to ensure client is ready
         org.bukkit.Bukkit.getScheduler().runTaskLater(
-                org.bukkit.Bukkit.getPluginManager().getPlugin("AgentCraft"),
+                plugin,
                 () -> tracker.showToPlayer(event.getPlayer()),
                 20L
         );

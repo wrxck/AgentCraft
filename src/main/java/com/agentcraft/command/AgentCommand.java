@@ -21,7 +21,7 @@ import java.util.stream.Collectors;
 public class AgentCommand implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS = Arrays.asList(
-            "spawn", "despawn", "task", "list", "status", "stop", "output", "reload",
+            "spawn", "spawnall", "despawn", "task", "list", "status", "stop", "output", "reload",
             "tp", "recall", "cancel", "expedition", "exp", "mission", "help"
     );
 
@@ -46,6 +46,7 @@ public class AgentCommand implements CommandExecutor, TabCompleter {
         String sub = args[0].toLowerCase();
         switch (sub) {
             case "spawn" -> handleSpawn(player, args);
+            case "spawnall" -> handleSpawnAll(player);
             case "despawn" -> handleDespawn(player, args);
             case "task" -> handleTask(player, args);
             case "list" -> handleList(player);
@@ -71,21 +72,69 @@ public class AgentCommand implements CommandExecutor, TabCompleter {
         }
 
         if (args.length < 2) {
-            MessageUtil.send(player, MessageUtil.error("Usage: /agent spawn <profile>"));
+            MessageUtil.send(player, MessageUtil.error("Usage: /agent spawn <profile> [count]"));
             return;
         }
 
         String profileId = args[1].toLowerCase();
         AgentManager mgr = AgentManager.getInstance();
 
-        AIAgent agent = mgr.spawnAgent(profileId, player.getLocation(), player);
-        if (agent == null) {
-            MessageUtil.send(player, MessageUtil.error("Failed to spawn agent. Check profile name or agent already exists."));
+        int count = 1;
+        if (args.length >= 3) {
+            try {
+                count = Integer.parseInt(args[2]);
+                if (count < 1 || count > 10) {
+                    MessageUtil.send(player, MessageUtil.error("Count must be between 1 and 10."));
+                    return;
+                }
+            } catch (NumberFormatException e) {
+                MessageUtil.send(player, MessageUtil.error("Invalid count: " + args[2]));
+                return;
+            }
+        }
+
+        int spawned = 0;
+        Location baseLoc = player.getLocation();
+        for (int i = 0; i < count; i++) {
+            Location loc = baseLoc.clone().add(i * 2, 0, 0);
+            AIAgent agent = mgr.spawnAgent(profileId, loc, player);
+            if (agent != null) {
+                spawned++;
+                MessageUtil.send(player, MessageUtil.success("Spawned agent " + MessageUtil.highlight(agent.getNpc().getName())
+                        + " (" + agent.getProfile().getSpecialty() + ")."));
+            }
+        }
+
+        if (spawned == 0) {
+            MessageUtil.send(player, MessageUtil.error("Failed to spawn any agents. Check profile name or max-spawns limit."));
+        } else if (spawned < count) {
+            MessageUtil.send(player, MessageUtil.info("Spawned " + spawned + "/" + count + " (hit max-spawns limit)."));
+        }
+    }
+
+    private void handleSpawnAll(Player player) {
+        if (!player.hasPermission("agentcraft.admin")) {
+            MessageUtil.send(player, MessageUtil.error("No permission."));
             return;
         }
 
-        MessageUtil.send(player, MessageUtil.success("Spawned agent " + MessageUtil.highlight(agent.getNpc().getName())
-                + " (" + agent.getProfile().getSpecialty() + ")."));
+        AgentManager mgr = AgentManager.getInstance();
+        Location baseLoc = player.getLocation();
+        int spawned = 0;
+        int index = 0;
+
+        for (String profileId : mgr.getProfileIds()) {
+            Location loc = baseLoc.clone().add(index * 2, 0, 0);
+            AIAgent agent = mgr.spawnAgent(profileId, loc, player);
+            if (agent != null) {
+                spawned++;
+                MessageUtil.send(player, MessageUtil.success("Spawned " + MessageUtil.highlight(agent.getNpc().getName())
+                        + " (" + agent.getProfile().getSpecialty() + ")."));
+            }
+            index++;
+        }
+
+        MessageUtil.send(player, MessageUtil.info("Spawned " + spawned + "/" + mgr.getProfileIds().size() + " agents."));
     }
 
     private void handleDespawn(Player player, String[] args) {
@@ -386,7 +435,8 @@ public class AgentCommand implements CommandExecutor, TabCompleter {
 
     private void showHelp(Player player) {
         MessageUtil.send(player, MessageUtil.info("Commands:"));
-        player.sendMessage("  /agent spawn <profile> - Spawn an agent");
+        player.sendMessage("  /agent spawn <profile> [count] - Spawn agent(s)");
+        player.sendMessage("  /agent spawnall - Spawn one of each profile");
         player.sendMessage("  /agent despawn <name> - Remove an agent");
         player.sendMessage("  /agent task <name> <task> - Assign a task");
         player.sendMessage("  /agent list - List active agents");

@@ -48,6 +48,7 @@ public class CaveExplorer {
 
         // Check if we've gone too far
         if (distanceFromEntry > MAX_EXPLORE_DISTANCE) {
+            agent.getBehaviorController().getNavigation().cancel();
             state = State.EXHAUSTED;
             return;
         }

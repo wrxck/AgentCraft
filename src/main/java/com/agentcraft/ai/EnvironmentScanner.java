@@ -132,8 +132,8 @@ public class EnvironmentScanner {
         // NPC state
         String stateDesc = switch (agent.getState()) {
             case IDLE -> "standing idle near your home location";
-            case THINKING -> "thinking about a coding task";
-            case WORKING -> "working on a coding task";
+            case THINKING -> "thinking about a task";
+            case WORKING -> "working on a task";
             case PAUSED -> "paused";
             case ON_EXPEDITION -> "on an expedition far from home";
         };

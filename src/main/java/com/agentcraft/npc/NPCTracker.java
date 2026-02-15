@@ -4,6 +4,7 @@ import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,7 +45,7 @@ public class NPCTracker {
     }
 
     public void showToPlayer(Player player) {
-        for (FakePlayer npc : byEntityId.values()) {
+        for (FakePlayer npc : new ArrayList<>(byEntityId.values())) {
             if (isInViewDistance(player, npc.getLocation())) {
                 npc.spawn(player);
             }
@@ -52,13 +53,13 @@ public class NPCTracker {
     }
 
     public void hideFromPlayer(Player player) {
-        for (FakePlayer npc : byEntityId.values()) {
+        for (FakePlayer npc : new ArrayList<>(byEntityId.values())) {
             npc.despawn(player);
         }
     }
 
     public void showNPCsInChunk(Player player, Chunk chunk) {
-        for (FakePlayer npc : byEntityId.values()) {
+        for (FakePlayer npc : new ArrayList<>(byEntityId.values())) {
             Location loc = npc.getLocation();
             if (loc.getWorld().equals(chunk.getWorld())
                     && loc.getBlockX() >> 4 == chunk.getX()

@@ -6,7 +6,7 @@
 
     <groupId>com.agentcraft</groupId>
     <artifactId>AgentCraft</artifactId>
-    <version>2.0.0</version>
+    <version>0.1.0-alpha</version>
     <packaging>jar</packaging>
 
     <properties>
@@ -45,18 +45,47 @@
             <version>2.10.1</version>
             <scope>provided</scope>
         </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.4</version>
+            <scope>compile</scope>
+        </dependency>
     </dependencies>
 
     <build>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-jar-plugin</artifactId>
-                <version>3.3.0</version>
-                <configuration>
-                    <outputDirectory>/home/matt/minecraft/plugins</outputDirectory>
-                    <finalName>AgentCraft</finalName>
-                </configuration>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>/home/matt/minecraft/plugins</outputDirectory>
+                            <outputFile>/home/matt/minecraft/plugins/AgentCraft.jar</outputFile>
+                            <relocations>
+                                <relocation>
+                                    <pattern>org.postgresql</pattern>
+                                    <shadedPattern>com.agentcraft.lib.postgresql</shadedPattern>
+                                </relocation>
+                            </relocations>
+                            <minimizeJar>true</minimizeJar>
+                            <filters>
+                                <filter>
+                                    <artifact>org.postgresql:postgresql</artifact>
+                                    <includes>
+                                        <include>**</include>
+                                    </includes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

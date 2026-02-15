@@ -121,6 +121,7 @@ public class MacroNavigator {
     }
 
     private void startReroutedSegment() {
+        releaseAllChunkTickets();
         Location current = agent.getNpc().getLocation();
         double dx = ultimateGoal.getX() - current.getX();
         double dz = ultimateGoal.getZ() - current.getZ();

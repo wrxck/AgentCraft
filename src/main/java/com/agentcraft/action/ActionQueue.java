@@ -48,19 +48,39 @@ public class ActionQueue {
                         return;
                     }
                     plugin.getLogger().info("[ActionQueue] Starting: " + current.getClass().getSimpleName());
-                    current.onStart();
+                    try {
+                        current.onStart();
+                    } catch (Exception e) {
+                        plugin.getLogger().warning("[ActionQueue] onStart() crashed for "
+                                + current.getClass().getSimpleName() + ": " + e.getMessage());
+                        current = null;
+                        return;
+                    }
                 }
 
-                ActionResult result = current.tick();
+                ActionResult result;
+                try {
+                    result = current.tick();
+                } catch (Exception e) {
+                    plugin.getLogger().warning("[ActionQueue] tick() crashed for "
+                            + current.getClass().getSimpleName() + ": " + e.getMessage());
+                    current = null;
+                    return;
+                }
+
                 switch (result) {
                     case SUCCESS -> {
                         plugin.getLogger().info("[ActionQueue] Completed: " + current.getClass().getSimpleName());
-                        current.onComplete();
+                        try { current.onComplete(); } catch (Exception e) {
+                            plugin.getLogger().warning("[ActionQueue] onComplete() error: " + e.getMessage());
+                        }
                         current = null;
                     }
                     case FAILED -> {
                         plugin.getLogger().info("[ActionQueue] Failed: " + current.getClass().getSimpleName());
-                        current.onFail();
+                        try { current.onFail(); } catch (Exception e) {
+                            plugin.getLogger().warning("[ActionQueue] onFail() error: " + e.getMessage());
+                        }
                         current = null;
                     }
                     case CONTINUE -> {} // keep ticking

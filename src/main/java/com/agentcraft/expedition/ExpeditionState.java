@@ -5,6 +5,7 @@ public enum ExpeditionState {
     DESCENDING,
     EXPLORING_CAVE,
     SEARCHING,
+    BRANCH_MINING,
     GATHERING,
     COMBAT,
     FLEEING,
