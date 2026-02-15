@@ -1,5 +1,7 @@
 package com.agentcraft.ai;
 
+import com.agentcraft.tool.MinecraftTool;
+import com.agentcraft.tool.ToolRegistry;
 import com.google.gson.*;
 
 import java.io.BufferedReader;
@@ -40,16 +42,71 @@ public class AnthropicProvider implements LLMProvider {
     private final Logger logger;
     private final HttpClient httpClient;
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
+    private final JsonArray toolsArray;
 
     // Per-session conversation history: sessionId -> list of {role, content} messages
     private final Map<String, List<JsonObject>> history = new ConcurrentHashMap<>();
 
-    public AnthropicProvider(String apiKey, Logger logger) {
+    // Track pending tool_use IDs per session for proper tool_result formatting
+    private final Map<String, String> pendingToolUseId = new ConcurrentHashMap<>();
+
+    public AnthropicProvider(String apiKey, Logger logger, ToolRegistry toolRegistry) {
         this.apiKey = apiKey;
         this.logger = logger;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .build();
+        this.toolsArray = buildToolsArray(toolRegistry);
+        logger.info("[AnthropicAPI] Registered " + toolsArray.size() + " tools for native tool calling");
+    }
+
+    private static JsonArray buildToolsArray(ToolRegistry registry) {
+        JsonArray tools = new JsonArray();
+        for (MinecraftTool tool : registry.getAll()) {
+            JsonObject toolDef = new JsonObject();
+            toolDef.addProperty("name", tool.getName());
+            toolDef.addProperty("description", tool.getDescription());
+
+            JsonObject inputSchema = new JsonObject();
+            inputSchema.addProperty("type", "object");
+            JsonObject properties = new JsonObject();
+            JsonArray required = new JsonArray();
+
+            JsonObject paramSchema = tool.getParameterSchema();
+            for (String key : paramSchema.keySet()) {
+                String desc = paramSchema.get(key).getAsString();
+                JsonObject prop = new JsonObject();
+                int colonIdx = desc.indexOf(':');
+                if (colonIdx > 0) {
+                    String typeStr = desc.substring(0, colonIdx).trim().toLowerCase();
+                    String description = desc.substring(colonIdx + 1).trim();
+                    if (typeStr.contains("integer") || typeStr.contains("int")) {
+                        prop.addProperty("type", "integer");
+                    } else if (typeStr.contains("number") || typeStr.contains("float")) {
+                        prop.addProperty("type", "number");
+                    } else {
+                        prop.addProperty("type", "string");
+                    }
+                    prop.addProperty("description", description);
+                } else {
+                    prop.addProperty("type", "string");
+                    prop.addProperty("description", desc);
+                }
+                properties.add(key, prop);
+                // Params with "default" or "optional" in description are not required
+                if (!desc.toLowerCase().contains("default") && !desc.toLowerCase().contains("optional")) {
+                    required.add(key);
+                }
+            }
+
+            inputSchema.add("properties", properties);
+            if (required.size() > 0) {
+                inputSchema.add("required", required);
+            }
+            toolDef.add("input_schema", inputSchema);
+            tools.add(toolDef);
+        }
+        return tools;
     }
 
     @Override
@@ -75,11 +132,25 @@ public class AnthropicProvider implements LLMProvider {
                 // Build messages array from history + new user message
                 List<JsonObject> sessionHistory = history.computeIfAbsent(sid, k -> new ArrayList<>());
 
-                // Add user message to history
-                JsonObject userMsg = new JsonObject();
-                userMsg.addProperty("role", "user");
-                userMsg.addProperty("content", prompt);
-                sessionHistory.add(userMsg);
+                // Check if previous turn had a tool_use — format this message as tool_result
+                String pendingId = pendingToolUseId.remove(sid);
+                if (pendingId != null) {
+                    JsonObject userMsg = new JsonObject();
+                    userMsg.addProperty("role", "user");
+                    JsonArray content = new JsonArray();
+                    JsonObject toolResult = new JsonObject();
+                    toolResult.addProperty("type", "tool_result");
+                    toolResult.addProperty("tool_use_id", pendingId);
+                    toolResult.addProperty("content", prompt);
+                    content.add(toolResult);
+                    userMsg.add("content", content);
+                    sessionHistory.add(userMsg);
+                } else {
+                    JsonObject userMsg = new JsonObject();
+                    userMsg.addProperty("role", "user");
+                    userMsg.addProperty("content", prompt);
+                    sessionHistory.add(userMsg);
+                }
 
                 // Prune history if too long (keep first message + last N)
                 pruneHistory(sessionHistory);
@@ -92,6 +163,11 @@ public class AnthropicProvider implements LLMProvider {
 
                 if (systemPrompt != null && !systemPrompt.isEmpty()) {
                     requestBody.addProperty("system", systemPrompt);
+                }
+
+                // Add native tools
+                if (toolsArray.size() > 0) {
+                    requestBody.add("tools", toolsArray);
                 }
 
                 JsonArray messagesArray = new JsonArray();
@@ -113,6 +189,7 @@ public class AnthropicProvider implements LLMProvider {
 
                 logger.info("[AnthropicAPI] Sending request (model=" + modelId
                         + ", messages=" + sessionHistory.size()
+                        + ", tools=" + toolsArray.size()
                         + ", session=" + sid + ")");
 
                 HttpResponse<java.io.InputStream> response = httpClient.send(request,
@@ -121,7 +198,6 @@ public class AnthropicProvider implements LLMProvider {
                 if (response.statusCode() != 200) {
                     String errorBody = new String(response.body().readAllBytes(), StandardCharsets.UTF_8);
                     logger.warning("[AnthropicAPI] HTTP " + response.statusCode() + ": " + errorBody);
-                    // Remove the user message we just added since the request failed
                     sessionHistory.remove(sessionHistory.size() - 1);
                     lineCallback.accept("{\"type\":\"result\",\"result\":\"API error (HTTP "
                             + response.statusCode() + ")\",\"session_id\":\"" + escapeJson(sid)
@@ -130,8 +206,11 @@ public class AnthropicProvider implements LLMProvider {
                     return 1;
                 }
 
-                // Parse SSE stream
+                // Parse SSE stream — handle both text and tool_use content blocks
                 StringBuilder fullResponse = new StringBuilder();
+                String toolUseId = null;
+                String toolUseName = null;
+                StringBuilder toolUseInput = new StringBuilder();
 
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
@@ -150,26 +229,43 @@ public class AnthropicProvider implements LLMProvider {
                             JsonObject event = JsonParser.parseString(data).getAsJsonObject();
                             String eventType = event.has("type") ? event.get("type").getAsString() : "";
 
-                            if ("content_block_delta".equals(eventType)) {
-                                JsonObject delta = event.getAsJsonObject("delta");
-                                if (delta != null && "text_delta".equals(
-                                        delta.has("type") ? delta.get("type").getAsString() : "")) {
-                                    String text = delta.get("text").getAsString();
-                                    fullResponse.append(text);
+                            switch (eventType) {
+                                case "content_block_start" -> {
+                                    JsonObject block = event.has("content_block")
+                                            ? event.getAsJsonObject("content_block") : null;
+                                    if (block != null && "tool_use".equals(
+                                            block.has("type") ? block.get("type").getAsString() : "")) {
+                                        toolUseId = block.has("id") ? block.get("id").getAsString() : null;
+                                        toolUseName = block.has("name") ? block.get("name").getAsString() : null;
+                                        toolUseInput.setLength(0);
+                                    }
                                 }
-                            } else if ("message_stop".equals(eventType)) {
-                                break;
-                            } else if ("error".equals(eventType)) {
-                                JsonObject error = event.getAsJsonObject("error");
-                                String errorMsg = error != null && error.has("message")
-                                        ? error.get("message").getAsString() : "Unknown error";
-                                logger.warning("[AnthropicAPI] Stream error: " + errorMsg);
-                                sessionHistory.remove(sessionHistory.size() - 1);
-                                lineCallback.accept("{\"type\":\"result\",\"result\":\"Stream error: "
-                                        + escapeJson(errorMsg) + "\",\"session_id\":\"" + escapeJson(sid)
-                                        + "\",\"total_cost_usd\":0,\"duration_ms\":"
-                                        + (System.currentTimeMillis() - startTime) + "}");
-                                return 1;
+                                case "content_block_delta" -> {
+                                    JsonObject delta = event.has("delta")
+                                            ? event.getAsJsonObject("delta") : null;
+                                    if (delta != null) {
+                                        String deltaType = delta.has("type") ? delta.get("type").getAsString() : "";
+                                        if ("text_delta".equals(deltaType)) {
+                                            fullResponse.append(delta.get("text").getAsString());
+                                        } else if ("input_json_delta".equals(deltaType)) {
+                                            toolUseInput.append(delta.get("partial_json").getAsString());
+                                        }
+                                    }
+                                }
+                                case "message_stop" -> {}
+                                case "error" -> {
+                                    JsonObject error = event.getAsJsonObject("error");
+                                    String errorMsg = error != null && error.has("message")
+                                            ? error.get("message").getAsString() : "Unknown error";
+                                    logger.warning("[AnthropicAPI] Stream error: " + errorMsg);
+                                    sessionHistory.remove(sessionHistory.size() - 1);
+                                    lineCallback.accept("{\"type\":\"result\",\"result\":\"Stream error: "
+                                            + escapeJson(errorMsg) + "\",\"session_id\":\"" + escapeJson(sid)
+                                            + "\",\"total_cost_usd\":0,\"duration_ms\":"
+                                            + (System.currentTimeMillis() - startTime) + "}");
+                                    return 1;
+                                }
+                                default -> {}
                             }
                         } catch (JsonSyntaxException e) {
                             // Skip malformed SSE data lines
@@ -180,27 +276,74 @@ public class AnthropicProvider implements LLMProvider {
                 String responseText = fullResponse.toString();
                 long durationMs = System.currentTimeMillis() - startTime;
 
-                logger.info("[AnthropicAPI] Response received (" + responseText.length()
-                        + " chars, " + durationMs + "ms)");
+                logger.info("[AnthropicAPI] Response received (" + responseText.length() + " chars"
+                        + (toolUseName != null ? ", tool=" + toolUseName : "") + ", " + durationMs + "ms)");
 
-                // Store assistant response in history
+                // Store assistant response in history with proper content blocks
                 JsonObject assistantMsg = new JsonObject();
                 assistantMsg.addProperty("role", "assistant");
-                assistantMsg.addProperty("content", responseText);
+                JsonArray contentBlocks = new JsonArray();
+
+                if (!responseText.isEmpty()) {
+                    JsonObject textBlock = new JsonObject();
+                    textBlock.addProperty("type", "text");
+                    textBlock.addProperty("text", responseText);
+                    contentBlocks.add(textBlock);
+                }
+
+                if (toolUseName != null && toolUseId != null) {
+                    JsonObject toolBlock = new JsonObject();
+                    toolBlock.addProperty("type", "tool_use");
+                    toolBlock.addProperty("id", toolUseId);
+                    toolBlock.addProperty("name", toolUseName);
+                    String inputStr = toolUseInput.toString();
+                    try {
+                        toolBlock.add("input", inputStr.isEmpty()
+                                ? new JsonObject()
+                                : JsonParser.parseString(inputStr).getAsJsonObject());
+                    } catch (Exception e) {
+                        toolBlock.add("input", new JsonObject());
+                    }
+                    contentBlocks.add(toolBlock);
+
+                    // Store pending ID so next call formats as tool_result
+                    pendingToolUseId.put(sid, toolUseId);
+                }
+
+                assistantMsg.add("content", contentBlocks);
                 sessionHistory.add(assistantMsg);
 
-                // Emit assistant event (matches CLI format)
-                JsonObject assistantEvent = new JsonObject();
-                assistantEvent.addProperty("type", "assistant");
-                JsonObject message = new JsonObject();
-                JsonArray content = new JsonArray();
-                JsonObject textBlock = new JsonObject();
-                textBlock.addProperty("type", "text");
-                textBlock.addProperty("text", responseText);
-                content.add(textBlock);
-                message.add("content", content);
-                assistantEvent.add("message", message);
-                lineCallback.accept(assistantEvent.toString());
+                // Emit ASSISTANT_TEXT event for chat text
+                if (!responseText.isEmpty()) {
+                    JsonObject textEvent = new JsonObject();
+                    textEvent.addProperty("type", "assistant");
+                    JsonObject msg = new JsonObject();
+                    JsonArray content = new JsonArray();
+                    JsonObject tb = new JsonObject();
+                    tb.addProperty("type", "text");
+                    tb.addProperty("text", responseText);
+                    content.add(tb);
+                    msg.add("content", content);
+                    textEvent.add("message", msg);
+                    lineCallback.accept(textEvent.toString());
+                }
+
+                // Emit TOOL_USE event for tool calls
+                if (toolUseName != null) {
+                    JsonObject toolEvent = new JsonObject();
+                    toolEvent.addProperty("type", "assistant");
+                    JsonObject msg = new JsonObject();
+                    JsonArray content = new JsonArray();
+                    JsonObject tb = new JsonObject();
+                    tb.addProperty("type", "tool_use");
+                    tb.addProperty("name", toolUseName);
+                    String inputStr = toolUseInput.toString();
+                    tb.addProperty("input", inputStr.isEmpty() ? "{}" : inputStr);
+                    content.add(tb);
+                    msg.add("content", content);
+                    toolEvent.add("message", msg);
+                    lineCallback.accept(toolEvent.toString());
+                }
 
                 // Emit result event
                 JsonObject resultEvent = new JsonObject();

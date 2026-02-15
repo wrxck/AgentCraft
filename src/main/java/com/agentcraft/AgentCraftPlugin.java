@@ -159,7 +159,7 @@ public class AgentCraftPlugin extends JavaPlugin {
                 getLogger().severe("llm-provider=api but no anthropic-api-key configured! Falling back to CLI.");
                 llmProvider = new CliProvider(this);
             } else {
-                llmProvider = new AnthropicProvider(anthropicKey, getLogger());
+                llmProvider = new AnthropicProvider(anthropicKey, getLogger(), toolRegistry);
                 getLogger().info("Using Anthropic HTTP API for NPC chat");
             }
         } else {

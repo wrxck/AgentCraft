@@ -121,6 +121,7 @@ public class ConversationManager {
     private void startChat(AIAgent agent, NpcSession session, String systemPrompt,
                            String userMessage, String primaryPlayer, int turnsRemaining) {
         StringBuilder responseBuilder = new StringBuilder();
+        final String[] toolUseCapture = new String[2]; // [name, inputJson]
 
         provider.streamChat(userMessage, systemPrompt, agent.getWorkingDirectory(),
                 session.sessionId, model, line -> {
@@ -143,6 +144,11 @@ public class ConversationManager {
                         responseBuilder.setLength(0);
                         responseBuilder.append(event.getText());
                     }
+                    // Capture native tool_use events (from API provider or CLI)
+                    if (event.getType() == StreamEvent.Type.TOOL_USE && event.getToolName() != null) {
+                        toolUseCapture[0] = event.getToolName();
+                        toolUseCapture[1] = event.getToolInput();
+                    }
                 }).handle((exitCode, throwable) -> {
             Bukkit.getScheduler().runTask(plugin, () -> {
                 try {
@@ -152,6 +158,23 @@ public class ConversationManager {
                         releaseBusy(agent, session);
                         return;
                     }
+
+                    // Native TOOL_USE from stream events takes priority
+                    if (toolUseCapture[0] != null) {
+                        broadcastChat(agent, responseBuilder.toString().trim(), primaryPlayer);
+                        String json = "{\"name\":\"" + toolUseCapture[0] + "\",\"params\":"
+                                + (toolUseCapture[1] != null && !toolUseCapture[1].isEmpty()
+                                    ? toolUseCapture[1] : "{}") + "}";
+                        ToolResult toolResult = executeToolCall(agent, json);
+                        if (toolResult != null && turnsRemaining > 1) {
+                            scheduleFollowUp(agent, session, toolResult, primaryPlayer, turnsRemaining - 1);
+                            return;
+                        }
+                        releaseBusy(agent, session);
+                        return;
+                    }
+
+                    // Fall back to text-based TOOL_CALL parsing
                     String response = responseBuilder.toString().trim();
                     if (!response.isEmpty()) {
                         ToolResult toolResult = handleResponse(agent, response, primaryPlayer);
@@ -228,52 +251,81 @@ public class ConversationManager {
     }
 
     /**
+     * Broadcast NPC chat text to all players and store as memory.
+     */
+    private void broadcastChat(AIAgent agent, String chatText, String playerName) {
+        if (chatText == null || chatText.isEmpty()) return;
+        String agentName = agent.getNpc().getName();
+        String formatted = MessageUtil.agentChat(agentName, chatText);
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            player.sendMessage(formatted);
+        }
+        MemoryManager memory = plugin.getMemoryManager();
+        if (memory != null && memory.isAvailable()) {
+            String summary = "[" + playerName + "] talked to " + agentName + ". "
+                    + agentName + " said: " + chatText;
+            memory.store(agentName, playerName, summary);
+        }
+    }
+
+    /**
      * Parse and handle a response from Claude.
+     * Finds TOOL_CALL: anywhere in the response (not just at line start) to handle
+     * both inline ("Sure! TOOL_CALL:{...}") and separate-line formats.
      * Returns the ToolResult if a tool was called (enables multi-turn chaining), null otherwise.
      */
     private ToolResult handleResponse(AIAgent agent, String response, String playerName) {
-        String[] lines = response.split("\n");
-        StringBuilder textBuilder = new StringBuilder();
-        String legacyAction = null;
+        String chatText;
         String toolCallJson = null;
+        String legacyAction = null;
 
-        for (String line : lines) {
-            String trimmed = line.trim();
-            if (trimmed.startsWith("TOOL_CALL:")) {
-                toolCallJson = trimmed.substring("TOOL_CALL:".length()).trim();
-            } else if (trimmed.startsWith("> ")) {
-                // Legacy action format
-                legacyAction = trimmed.substring(2).trim();
-            } else if (!trimmed.isEmpty()) {
-                if (textBuilder.length() > 0) textBuilder.append(" ");
-                textBuilder.append(trimmed);
+        // Find TOOL_CALL: anywhere in the response (handles inline format)
+        int toolCallIdx = response.indexOf("TOOL_CALL:");
+        if (toolCallIdx < 0) toolCallIdx = response.indexOf("TOOL_CALL :");
+
+        if (toolCallIdx >= 0) {
+            chatText = response.substring(0, toolCallIdx).trim();
+            String afterMarker = response.substring(toolCallIdx);
+            // Extract JSON object after the marker
+            int jsonStart = afterMarker.indexOf('{');
+            if (jsonStart >= 0) {
+                int braceDepth = 0;
+                int jsonEnd = -1;
+                for (int i = jsonStart; i < afterMarker.length(); i++) {
+                    char c = afterMarker.charAt(i);
+                    if (c == '{') braceDepth++;
+                    else if (c == '}') {
+                        braceDepth--;
+                        if (braceDepth == 0) {
+                            jsonEnd = i + 1;
+                            break;
+                        }
+                    }
+                }
+                if (jsonEnd > 0) {
+                    toolCallJson = afterMarker.substring(jsonStart, jsonEnd);
+                }
             }
+        } else {
+            // No TOOL_CALL found — check for legacy > action format
+            StringBuilder textBuilder = new StringBuilder();
+            for (String line : response.split("\n")) {
+                String trimmed = line.trim();
+                if (trimmed.startsWith("> ")) {
+                    legacyAction = trimmed.substring(2).trim();
+                } else if (!trimmed.isEmpty()) {
+                    if (textBuilder.length() > 0) textBuilder.append(" ");
+                    textBuilder.append(trimmed);
+                }
+            }
+            chatText = textBuilder.toString().trim();
         }
-        String chatText = textBuilder.toString().trim();
 
-        // Broadcast NPC chat
-        if (!chatText.isEmpty()) {
-            String agentName = agent.getNpc().getName();
-            String formatted = MessageUtil.agentChat(agentName, chatText);
-            for (Player player : Bukkit.getOnlinePlayers()) {
-                player.sendMessage(formatted);
-            }
+        broadcastChat(agent, chatText, playerName);
 
-            // Store conversation as memory
-            MemoryManager memory = plugin.getMemoryManager();
-            if (memory != null && memory.isAvailable()) {
-                String summary = "[" + playerName + "] talked to " + agentName + ". "
-                        + agentName + " said: " + chatText;
-                memory.store(agentName, playerName, summary);
-            }
-        }
-
-        // Execute tool call (new structured format)
         if (toolCallJson != null) {
             return executeToolCall(agent, toolCallJson);
         }
-
-        // Legacy fallback: execute > action format
         if (legacyAction != null && !legacyAction.isEmpty()) {
             plugin.getLogger().info("[Chat] " + agent.getNpc().getName() + " action: " + legacyAction);
             agent.getBehaviorController().executeAction(legacyAction);
@@ -381,6 +433,7 @@ public class ConversationManager {
                                       String systemPrompt, String userMessage,
                                       String agentName, int turnsRemaining, Runnable onComplete) {
         StringBuilder responseBuilder = new StringBuilder();
+        final String[] toolUseCapture = new String[2]; // [name, inputJson]
 
         provider.streamChat(userMessage, systemPrompt, agent.getWorkingDirectory(),
                 session.sessionId, model, line -> {
@@ -399,6 +452,10 @@ public class ConversationManager {
                         responseBuilder.setLength(0);
                         responseBuilder.append(event.getText());
                     }
+                    if (event.getType() == StreamEvent.Type.TOOL_USE && event.getToolName() != null) {
+                        toolUseCapture[0] = event.getToolName();
+                        toolUseCapture[1] = event.getToolInput();
+                    }
                 }).handle((exitCode, throwable) -> {
             Bukkit.getScheduler().runTask(plugin, () -> {
                 try {
@@ -408,39 +465,52 @@ public class ConversationManager {
                         onComplete.run();
                         return;
                     }
-                    String response = responseBuilder.toString().trim();
-                    if (!response.isEmpty()) {
-                        ToolResult toolResult = handleResponse(agent, response, "autonomous");
-                        if (toolResult != null && turnsRemaining > 1) {
-                            // Follow up with delta environment
-                            Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                                try {
-                                    String envDelta;
-                                    if (session.lastScan != null) {
-                                        envDelta = CompactScanner.scanDelta(agent, session.lastScan);
-                                        session.lastScan = CompactScanner.scan(agent);
-                                    } else {
-                                        CompactScanner.ScanResult fresh = CompactScanner.scan(agent);
-                                        session.lastScan = fresh;
-                                        envDelta = fresh.full;
-                                    }
 
-                                    String followUp = "[Tool Result] "
-                                            + (toolResult.success() ? "OK" : "FAIL") + ": "
-                                            + toolResult.message() + "\n"
-                                            + envDelta + "\n"
-                                            + "Continue with your task. Call another tool if needed, or reply to finish.";
-                                    startAutonomousChat(agent, session, null, followUp,
-                                            agentName, turnsRemaining - 1, onComplete);
-                                } catch (Exception e) {
-                                    plugin.getLogger().log(Level.WARNING,
-                                            "[Chat] Autonomous follow-up error for " + agentName, e);
-                                    onComplete.run();
-                                }
-                            }, FOLLOW_UP_DELAY_TICKS);
-                            return;
+                    // Resolve tool result from either native TOOL_USE or text-based TOOL_CALL
+                    ToolResult toolResult = null;
+                    if (toolUseCapture[0] != null) {
+                        broadcastChat(agent, responseBuilder.toString().trim(), "autonomous");
+                        String json = "{\"name\":\"" + toolUseCapture[0] + "\",\"params\":"
+                                + (toolUseCapture[1] != null && !toolUseCapture[1].isEmpty()
+                                    ? toolUseCapture[1] : "{}") + "}";
+                        toolResult = executeToolCall(agent, json);
+                    } else {
+                        String response = responseBuilder.toString().trim();
+                        if (!response.isEmpty()) {
+                            toolResult = handleResponse(agent, response, "autonomous");
                         }
                     }
+
+                    if (toolResult != null && turnsRemaining > 1) {
+                        final ToolResult tr = toolResult;
+                        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                            try {
+                                String envDelta;
+                                if (session.lastScan != null) {
+                                    envDelta = CompactScanner.scanDelta(agent, session.lastScan);
+                                    session.lastScan = CompactScanner.scan(agent);
+                                } else {
+                                    CompactScanner.ScanResult fresh = CompactScanner.scan(agent);
+                                    session.lastScan = fresh;
+                                    envDelta = fresh.full;
+                                }
+
+                                String followUp = "[Tool Result] "
+                                        + (tr.success() ? "OK" : "FAIL") + ": "
+                                        + tr.message() + "\n"
+                                        + envDelta + "\n"
+                                        + "Continue with your task. Call another tool if needed, or reply to finish.";
+                                startAutonomousChat(agent, session, null, followUp,
+                                        agentName, turnsRemaining - 1, onComplete);
+                            } catch (Exception e) {
+                                plugin.getLogger().log(Level.WARNING,
+                                        "[Chat] Autonomous follow-up error for " + agentName, e);
+                                onComplete.run();
+                            }
+                        }, FOLLOW_UP_DELAY_TICKS);
+                        return;
+                    }
+
                     onComplete.run();
                 } catch (Exception e) {
                     plugin.getLogger().log(Level.WARNING,
