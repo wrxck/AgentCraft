@@ -1,0 +1,53 @@
+# AgentCraft Configuration
+
+# Claude CLI binary path
+claude-cli-path: "/usr/local/bin/claude"
+
+# Claude credentials path (mounted from host)
+claude-credentials-path: "/claude-auth/.credentials.json"
+
+# Agent output directory (inside container)
+agent-output-base: "/minecraft/agent_output"
+
+# Agent output directory (on host, for display purposes)
+agent-output-host: "/home/matt/minecraft/agent_output"
+
+# Maximum agentic turns per task
+max-turns: 25
+
+# Delay ticks between actions (20 ticks = 1 second)
+action-delay-ticks: 4
+
+# Chat proximity radius (blocks) for addressing agents
+chat-radius: 15
+
+# Rate limiter: max tokens per player
+rate-limit-tokens: 5
+
+# Rate limiter: token refill interval in seconds
+rate-limit-refill-seconds: 60
+
+# Allowed players (empty = allow all)
+allowed-players: []
+
+# Default agent profile
+default-profile: fullstack
+
+# Players whose chat is forwarded to NPCs for conversation (empty = nobody)
+chat-players:
+  - "5X_Productions"
+  - "1jakku"
+
+# Model for NPC conversations (haiku = fast, sonnet = smarter)
+chat-model: "haiku"
+
+# Seconds to wait after last message before NPC responds (batches rapid messages)
+chat-debounce-seconds: 2
+
+# Memory system (vector DB for long-term NPC memory)
+memory:
+  qdrant-host: "qdrant"
+  qdrant-port: 6333
+  qdrant-api-key: ""
+  embeddings-host: "embeddings"
+  embeddings-port: 8090
