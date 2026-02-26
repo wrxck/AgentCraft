@@ -87,6 +87,12 @@ public class AgentProfile {
         }
 
         // Default name/skin for backward compat
+        if (profile.names.isEmpty()) {
+            profile.names.add(profileId);
+        }
+        if (profile.skins.isEmpty()) {
+            profile.skins.add("Steve");
+        }
         profile.name = profile.names.get(0);
         profile.skin = profile.skins.get(0);
 

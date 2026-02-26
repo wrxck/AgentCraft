@@ -24,8 +24,7 @@ public class RateLimiter {
     public int remainingTokens(UUID playerId) {
         TokenBucket bucket = buckets.get(playerId);
         if (bucket == null) return maxTokens;
-        bucket.refill();
-        return bucket.tokens;
+        return bucket.remainingTokens();
     }
 
     private class TokenBucket {
@@ -46,13 +45,18 @@ public class RateLimiter {
             return false;
         }
 
-        void refill() {
+        synchronized int remainingTokens() {
+            refill();
+            return tokens;
+        }
+
+        synchronized void refill() {
             long now = System.currentTimeMillis();
             long elapsed = now - lastRefillTime;
             int newTokens = (int) (elapsed / refillIntervalMs);
             if (newTokens > 0) {
                 tokens = Math.min(maxTokens, tokens + newTokens);
-                lastRefillTime = now;
+                lastRefillTime += newTokens * refillIntervalMs;
             }
         }
     }

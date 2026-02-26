@@ -1247,7 +1247,7 @@ public class BehaviorController {
             }
         }
 
-        Player owner = Bukkit.getPlayer(taskRequesterId != null ? taskRequesterId : null);
+        Player owner = taskRequesterId != null ? Bukkit.getPlayer(taskRequesterId) : null;
         if (owner == null) {
             // Find nearest player as fallback
             owner = findNearestPlayer();

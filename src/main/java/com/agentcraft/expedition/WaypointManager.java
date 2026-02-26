@@ -29,7 +29,9 @@ public class WaypointManager {
     }
 
     public void tick(Location currentLocation) {
-        if (lastLocation != null && lastLocation.getWorld().equals(currentLocation.getWorld())) {
+        if (lastLocation != null && lastLocation.getWorld() != null
+                && currentLocation.getWorld() != null
+                && lastLocation.getWorld().equals(currentLocation.getWorld())) {
             totalDistanceTraveled += lastLocation.distance(currentLocation);
         }
         lastLocation = currentLocation.clone();
