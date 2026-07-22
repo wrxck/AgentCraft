@@ -153,7 +153,7 @@ public class AnthropicProvider implements LLMProvider {
                 }
 
                 // Prune history if too long (keep first message + last N)
-                pruneHistory(sessionHistory);
+                pruneHistory(sessionHistory, MAX_HISTORY_MESSAGES);
 
                 // Build request body
                 JsonObject requestBody = new JsonObject();
@@ -196,9 +196,12 @@ public class AnthropicProvider implements LLMProvider {
                         HttpResponse.BodyHandlers.ofInputStream());
 
                 if (response.statusCode() != 200) {
-                    String errorBody = new String(response.body().readAllBytes(), StandardCharsets.UTF_8);
+                    String errorBody;
+                    try (java.io.InputStream errorStream = response.body()) {
+                        errorBody = new String(errorStream.readAllBytes(), StandardCharsets.UTF_8);
+                    }
                     logger.warning("[AnthropicAPI] HTTP " + response.statusCode() + ": " + errorBody);
-                    sessionHistory.remove(sessionHistory.size() - 1);
+                    rollbackAfterError(sessionHistory);
                     lineCallback.accept("{\"type\":\"result\",\"result\":\"API error (HTTP "
                             + response.statusCode() + ")\",\"session_id\":\"" + escapeJson(sid)
                             + "\",\"total_cost_usd\":0,\"duration_ms\":"
@@ -258,7 +261,7 @@ public class AnthropicProvider implements LLMProvider {
                                     String errorMsg = error != null && error.has("message")
                                             ? error.get("message").getAsString() : "Unknown error";
                                     logger.warning("[AnthropicAPI] Stream error: " + errorMsg);
-                                    sessionHistory.remove(sessionHistory.size() - 1);
+                                    rollbackAfterError(sessionHistory);
                                     lineCallback.accept("{\"type\":\"result\",\"result\":\"Stream error: "
                                             + escapeJson(errorMsg) + "\",\"session_id\":\"" + escapeJson(sid)
                                             + "\",\"total_cost_usd\":0,\"duration_ms\":"
@@ -330,19 +333,7 @@ public class AnthropicProvider implements LLMProvider {
 
                 // Emit TOOL_USE event for tool calls
                 if (toolUseName != null) {
-                    JsonObject toolEvent = new JsonObject();
-                    toolEvent.addProperty("type", "assistant");
-                    JsonObject msg = new JsonObject();
-                    JsonArray content = new JsonArray();
-                    JsonObject tb = new JsonObject();
-                    tb.addProperty("type", "tool_use");
-                    tb.addProperty("name", toolUseName);
-                    String inputStr = toolUseInput.toString();
-                    tb.addProperty("input", inputStr.isEmpty() ? "{}" : inputStr);
-                    content.add(tb);
-                    msg.add("content", content);
-                    toolEvent.add("message", msg);
-                    lineCallback.accept(toolEvent.toString());
+                    lineCallback.accept(buildToolUseEvent(toolUseName, toolUseInput.toString()));
                 }
 
                 // Emit result event
@@ -376,10 +367,83 @@ public class AnthropicProvider implements LLMProvider {
         }
     }
 
-    private void pruneHistory(List<JsonObject> messages) {
-        while (messages.size() > MAX_HISTORY_MESSAGES) {
+    // Package-private for tests.
+    static void pruneHistory(List<JsonObject> messages, int maxMessages) {
+        while (messages.size() > maxMessages) {
+            JsonObject removed = messages.remove(0);
+            // Dropping an assistant tool_use must also drop its paired
+            // tool_result, or the API rejects the orphan with a 400 forever.
+            if (containsBlockType(removed, "tool_use") && !messages.isEmpty()
+                    && containsBlockType(messages.get(0), "tool_result")) {
+                messages.remove(0);
+            }
+        }
+        // A tool_result must never end up as the first message.
+        while (!messages.isEmpty() && containsBlockType(messages.get(0), "tool_result")) {
             messages.remove(0);
         }
+    }
+
+    /**
+     * Build the synthetic assistant tool_use NDJSON event emitted to the stream
+     * callback. Package-private for tests.
+     */
+    static String buildToolUseEvent(String toolUseName, String inputStr) {
+        JsonObject toolEvent = new JsonObject();
+        toolEvent.addProperty("type", "assistant");
+        JsonObject msg = new JsonObject();
+        JsonArray content = new JsonArray();
+        JsonObject tb = new JsonObject();
+        tb.addProperty("type", "tool_use");
+        tb.addProperty("name", toolUseName);
+        // Input must be a real JSON object: emitting it as a string primitive
+        // breaks downstream params parsing (getAsJsonObject on a string).
+        JsonObject inputObj;
+        try {
+            inputObj = (inputStr == null || inputStr.isEmpty())
+                    ? new JsonObject()
+                    : JsonParser.parseString(inputStr).getAsJsonObject();
+        } catch (Exception e) {
+            inputObj = new JsonObject();
+        }
+        tb.add("input", inputObj);
+        content.add(tb);
+        msg.add("content", content);
+        toolEvent.add("message", msg);
+        return toolEvent.toString();
+    }
+
+    /**
+     * Roll back session history after a failed request: removes the just-added
+     * user message, plus any assistant tool_use left dangling at the tail —
+     * a trailing tool_use without its tool_result wedges the session with a
+     * 400 on every subsequent call. Package-private for tests.
+     */
+    static void rollbackAfterError(List<JsonObject> messages) {
+        if (!messages.isEmpty()) {
+            messages.remove(messages.size() - 1);
+        }
+        while (!messages.isEmpty()) {
+            JsonObject last = messages.get(messages.size() - 1);
+            boolean assistant = last.has("role") && "assistant".equals(last.get("role").getAsString());
+            if (assistant && containsBlockType(last, "tool_use")) {
+                messages.remove(messages.size() - 1);
+            } else {
+                break;
+            }
+        }
+    }
+
+    private static boolean containsBlockType(JsonObject message, String blockType) {
+        JsonElement content = message.get("content");
+        if (content == null || !content.isJsonArray()) return false;
+        for (JsonElement el : content.getAsJsonArray()) {
+            if (el.isJsonObject()) {
+                JsonElement type = el.getAsJsonObject().get("type");
+                if (type != null && blockType.equals(type.getAsString())) return true;
+            }
+        }
+        return false;
     }
 
     private static String escapeJson(String s) {

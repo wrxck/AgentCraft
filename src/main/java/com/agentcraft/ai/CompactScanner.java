@@ -46,7 +46,6 @@ public class CompactScanner {
     static {
         // Ground materials -> '.'
         for (Material m : Material.values()) {
-            String n = m.name();
             if (m == Material.GRASS_BLOCK || m == Material.DIRT || m == Material.SAND
                     || m == Material.GRAVEL || m == Material.DIRT_PATH || m == Material.PODZOL
                     || m == Material.COARSE_DIRT || m == Material.ROOTED_DIRT
@@ -92,7 +91,7 @@ public class CompactScanner {
                 BLOCK_CHARS.put(m, 'D');
             } else if (n.contains("BRICK") || n.contains("CONCRETE") || n.contains("TERRACOTTA")
                     || n.contains("PRISMARINE") || n.contains("PURPUR") || n.contains("QUARTZ_BLOCK")
-                    || n.contains("SANDSTONE") && !n.contains("SAND")) {
+                    || n.contains("SANDSTONE")) {
                 BLOCK_CHARS.put(m, '#');
             } else if (n.endsWith("_BED") && !n.equals("BEDROCK")) {
                 BLOCK_CHARS.put(m, 'B');
@@ -397,7 +396,11 @@ public class CompactScanner {
     }
 
     private static char getBlockChar(Block block) {
-        Material mat = block.getType();
+        return charForMaterial(block.getType());
+    }
+
+    // Package-private for tests.
+    static char charForMaterial(Material mat) {
         if (mat == Material.AIR || mat == Material.CAVE_AIR || mat == Material.VOID_AIR) {
             return ' ';
         }
