@@ -39,10 +39,6 @@ public class NPCGear {
         return hp <= 0;
     }
 
-    public boolean isPickaxeBroken() {
-        return pickaxeDurability <= 0;
-    }
-
     public boolean shouldEat() {
         return hp < EAT_THRESHOLD && foodCount > 0;
     }

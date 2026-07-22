@@ -3,9 +3,12 @@ package com.agentcraft.expedition;
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.navigation.NavigationController;
 import com.agentcraft.util.LocationUtil;
+import com.agentcraft.util.MaterialMatcher;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+
+import java.util.function.UnaryOperator;
 
 /**
  * Explores caves found during staircase mining, scanning for target materials.
@@ -16,7 +19,6 @@ public class CaveExplorer {
     private static final int SCAN_RADIUS = 8;
     private static final int MAX_EXPLORE_DISTANCE = 100;
     private static final int SEGMENT_LENGTH = 40;
-    private static final double ARRIVAL_THRESHOLD = 2.0;
 
     public enum State { IDLE, SCANNING, NAVIGATING, FOUND_TARGET, EXHAUSTED }
 
@@ -100,7 +102,7 @@ public class CaveExplorer {
         }
     }
 
-    private Location scanForMaterial(Location center) {
+    Location scanForMaterial(Location center) {
         World world = center.getWorld();
         int cx = center.getBlockX();
         int cy = center.getBlockY();
@@ -113,8 +115,7 @@ public class CaveExplorer {
             for (int y = -SCAN_RADIUS; y <= SCAN_RADIUS; y++) {
                 for (int z = -SCAN_RADIUS; z <= SCAN_RADIUS; z++) {
                     Block b = world.getBlockAt(cx + x, cy + y, cz + z);
-                    String name = b.getType().name();
-                    if (name.contains(targetMaterial) || name.equalsIgnoreCase(targetMaterial)) {
+                    if (MaterialMatcher.matches(b.getType(), targetMaterial)) {
                         double distSq = b.getLocation().distanceSquared(center);
                         if (distSq < nearestDistSq) {
                             nearestDistSq = distSq;
@@ -129,12 +130,18 @@ public class CaveExplorer {
     }
 
     private Location findNextPassage(Location npcLoc) {
-        // Find the largest air opening in cardinal directions
-        World world = npcLoc.getWorld();
-        int cx = npcLoc.getBlockX();
-        int cy = npcLoc.getBlockY();
-        int cz = npcLoc.getBlockZ();
+        return selectPassage(npcLoc.getWorld(),
+                npcLoc.getBlockX(), npcLoc.getBlockY(), npcLoc.getBlockZ(),
+                distanceFromEntry, LocationUtil::findSafeGround);
+    }
 
+    /**
+     * Find the largest air opening in cardinal directions and pick a
+     * navigation target in that direction. Package-private and side-effect
+     * free so the direction-selection logic can be unit tested.
+     */
+    static Location selectPassage(World world, int cx, int cy, int cz,
+                                  double distanceFromEntry, UnaryOperator<Location> groundFinder) {
         int[][] directions = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
         Location bestPassage = null;
         int bestAirCount = 0;
@@ -151,21 +158,24 @@ public class CaveExplorer {
                 }
             }
 
-            if (airCount > bestAirCount) {
-                bestAirCount = airCount;
-                int targetDist = Math.min(SEGMENT_LENGTH, (int)(MAX_EXPLORE_DISTANCE - distanceFromEntry));
-                if (targetDist < 5) continue;
+            if (airCount <= bestAirCount) continue;
 
-                double tx = cx + dir[0] * targetDist + 0.5;
-                double tz = cz + dir[1] * targetDist + 0.5;
-                Location candidate = new Location(world, tx, cy, tz);
-                Location safe = LocationUtil.findSafeGround(candidate);
+            int targetDist = Math.min(SEGMENT_LENGTH, (int) (MAX_EXPLORE_DISTANCE - distanceFromEntry));
+            if (targetDist < 5) continue;
 
-                // Only pick passages that stay underground
-                if (safe.getBlockY() < cy + 5) {
-                    bestPassage = safe;
-                }
-            }
+            double tx = cx + dir[0] * targetDist + 0.5;
+            double tz = cz + dir[1] * targetDist + 0.5;
+            Location candidate = new Location(world, tx, cy, tz);
+            Location safe = groundFinder.apply(candidate);
+
+            // Only pick passages that stay underground
+            if (safe.getBlockY() >= cy + 5) continue;
+
+            // Candidate fully validated: only now may it update the best
+            // pick. (Updating bestAirCount before validation would let a
+            // rejected direction shadow later, valid ones.)
+            bestAirCount = airCount;
+            bestPassage = safe;
         }
 
         return bestPassage;
@@ -175,5 +185,4 @@ public class CaveExplorer {
     public boolean hasFoundTarget() { return state == State.FOUND_TARGET; }
     public boolean isExhausted() { return state == State.EXHAUSTED; }
     public Location getTargetLocation() { return targetLocation; }
-    public double getDistanceFromEntry() { return distanceFromEntry; }
 }

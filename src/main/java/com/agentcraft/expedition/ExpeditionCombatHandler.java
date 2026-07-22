@@ -57,6 +57,8 @@ public class ExpeditionCombatHandler {
     private boolean fleeArrived;
     private boolean fleeFailed;
     private int killCount;
+    private String lastKillName;
+    private int lastThreatCount;
 
     public ExpeditionCombatHandler(AIAgent agent, NPCGear gear) {
         this.agent = agent;
@@ -81,6 +83,8 @@ public class ExpeditionCombatHandler {
         }
 
         if (threats.isEmpty()) return CombatResult.NONE;
+
+        lastThreatCount = threats.size();
 
         if (threats.size() >= 3) {
             startFleeing(npcLoc, threats.get(0).getLocation());
@@ -142,7 +146,7 @@ public class ExpeditionCombatHandler {
     private void tickFighting() {
         if (currentTarget == null || currentTarget.isDead()) {
             if (currentTarget != null && currentTarget.isDead()) {
-                killCount++;
+                registerKill();
             }
             fighting = false;
             currentTarget = null;
@@ -156,7 +160,14 @@ public class ExpeditionCombatHandler {
         if (dist > ATTACK_REACH) {
             // Keep chasing
             NavigationController nav = agent.getBehaviorController().getNavigation();
-            nav.updateGoalIfMoved(currentTarget.getLocation());
+            if (!nav.isNavigating()) {
+                // Navigation was cancelled (e.g. after closing to attack
+                // range) and the target escaped again: restart the chase,
+                // updateGoalIfMoved() alone is a no-op while idle.
+                nav.navigateTo(currentTarget.getLocation());
+            } else {
+                nav.updateGoalIfMoved(currentTarget.getLocation());
+            }
             return;
         }
 
@@ -179,10 +190,15 @@ public class ExpeditionCombatHandler {
         currentTarget.damage(gear.getSwordDamage());
 
         if (currentTarget.isDead()) {
-            killCount++;
+            registerKill();
             fighting = false;
             currentTarget = null;
         }
+    }
+
+    private void registerKill() {
+        killCount++;
+        lastKillName = currentTarget.getType().name().toLowerCase();
     }
 
     private void startFleeing(Location npcLoc, Location threatLoc) {
@@ -252,6 +268,21 @@ public class ExpeditionCombatHandler {
     }
 
     public int getKillCount() { return killCount; }
+
+    /**
+     * Name of the most recently killed mob, or null. Clears on read, so the
+     * caller reports each kill exactly once. (The target reference itself is
+     * nulled before callers can observe the kill, hence this capture.)
+     */
+    public String consumeLastKillName() {
+        String name = lastKillName;
+        lastKillName = null;
+        return name;
+    }
+
+    /** Number of threats seen by the most recent scan that found any. */
+    public int getLastThreatCount() { return lastThreatCount; }
+
     public LivingEntity getCurrentTarget() { return currentTarget; }
     public boolean isFighting() { return fighting; }
     public boolean isFleeing() { return fleeing; }

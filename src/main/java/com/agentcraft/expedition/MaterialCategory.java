@@ -1,5 +1,7 @@
 package com.agentcraft.expedition;
 
+import com.agentcraft.util.MaterialMatcher;
+
 public enum MaterialCategory {
 
     SURFACE(64, 320),
@@ -32,7 +34,10 @@ public enum MaterialCategory {
     }
 
     public static MaterialCategory resolve(String materialName) {
-        String name = materialName.toLowerCase();
+        // Normalize like MaterialMatcher (trim, spaces -> underscores), then
+        // lowercase for the contains() checks: "ancient debris" must resolve
+        // exactly like "ancient_debris".
+        String name = MaterialMatcher.normalize(materialName).toLowerCase();
 
         // Surface materials
         if (name.contains("log") || name.contains("leaves") || name.contains("sapling")

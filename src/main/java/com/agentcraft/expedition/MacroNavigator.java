@@ -3,7 +3,6 @@ package com.agentcraft.expedition;
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.navigation.NavigationController;
 import com.agentcraft.util.LocationUtil;
-import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -31,7 +30,6 @@ public class MacroNavigator {
 
     private State state = State.IDLE;
     private Location ultimateGoal;
-    private Location currentSegmentGoal;
     private boolean segmentArrived;
     private boolean segmentFailed;
     private int rerouteAttempts;
@@ -56,7 +54,6 @@ public class MacroNavigator {
     public void cancel() {
         state = State.IDLE;
         ultimateGoal = null;
-        currentSegmentGoal = null;
         segmentArrived = false;
         segmentFailed = false;
         rerouteAttempts = 0;
@@ -98,6 +95,12 @@ public class MacroNavigator {
             }
             // Try rerouting at an offset angle
             startReroutedSegment();
+        } else if (!agent.getBehaviorController().getNavigation().isNavigating()) {
+            // A segment is supposedly in flight but the low-level navigation
+            // is idle and neither callback fired: an interrupt (e.g. combat)
+            // cancelled the navigation and wiped our callbacks. Re-issue the
+            // segment instead of waiting forever.
+            startNextSegment();
         }
     }
 
@@ -163,7 +166,6 @@ public class MacroNavigator {
             activeChunkTickets.add(targetChunk);
         }
 
-        currentSegmentGoal = safeTarget;
         segmentArrived = false;
         segmentFailed = false;
 
@@ -197,5 +199,4 @@ public class MacroNavigator {
     public boolean hasArrived() { return state == State.ARRIVED; }
     public boolean hasFailed() { return state == State.FAILED; }
     public double getTotalDistanceTraveled() { return totalDistanceTraveled; }
-    public Location getUltimateGoal() { return ultimateGoal; }
 }
