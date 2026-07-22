@@ -1,7 +1,10 @@
 package com.agentcraft.tool.impl;
 
 import com.agentcraft.agent.AIAgent;
+import com.agentcraft.npc.AgentEquipment;
+import com.agentcraft.npc.FakePlayer;
 import com.agentcraft.tool.MinecraftTool;
+import com.agentcraft.tool.ToolArgs;
 import com.agentcraft.tool.ToolResult;
 import com.comphenix.protocol.wrappers.EnumWrappers;
 import com.google.gson.JsonObject;
@@ -41,8 +44,18 @@ public class EquipTool implements MinecraftTool {
     }
 
     @Override public ToolResult execute(AIAgent agent, JsonObject params) {
-        String slotName = params.has("slot") ? params.get("slot").getAsString().toLowerCase() : null;
-        String matName = params.has("material") ? params.get("material").getAsString().toLowerCase().replace(' ', '_') : null;
+        try {
+            return run(agent, params);
+        } catch (ToolArgs.BadArgument e) {
+            return ToolResult.fail(e.getMessage());
+        }
+    }
+
+    private ToolResult run(AIAgent agent, JsonObject params) {
+        String rawSlot = ToolArgs.optString(params, "slot");
+        String slotName = rawSlot != null ? rawSlot.toLowerCase() : null;
+        String rawMat = ToolArgs.optString(params, "material");
+        String matName = rawMat != null ? rawMat.toLowerCase().replace(' ', '_') : null;
 
         if (slotName == null || slotName.isEmpty()) return ToolResult.fail("No slot specified");
         if (matName == null || matName.isEmpty()) return ToolResult.fail("No material specified");
@@ -68,12 +81,28 @@ public class EquipTool implements MinecraftTool {
             return ToolResult.fail("No " + matName + " in inventory");
         }
 
-        // Remove from inventory and send equipment packet
+        // Clone BEFORE removal so enchantments/meta survive; remove one item.
+        ItemStack equipItem = found.clone();
+        equipItem.setAmount(1);
         agent.getBehaviorController().removeFromInventory(foundMat);
-        ItemStack equipItem = new ItemStack(foundMat);
+
+        // Update the persistent equipment model so respawns/late joiners see it
+        // too, and recover any item previously equipped in this slot.
+        FakePlayer npc = agent.getNpc();
+        AgentEquipment current = npc.getEquipment();
+        EquipmentOverlay overlay = current instanceof EquipmentOverlay existing
+                ? existing
+                : new EquipmentOverlay(current);
+        ItemStack previous = overlay.put(slot, equipItem);
+        npc.setEquipment(overlay);
+
+        if (previous != null) {
+            // Return the replaced item to inventory instead of voiding it.
+            agent.getBehaviorController().addToInventory(previous);
+        }
 
         for (Player viewer : Bukkit.getOnlinePlayers()) {
-            agent.getNpc().sendEquipmentSlot(viewer, slot, equipItem);
+            npc.sendEquipmentSlot(viewer, slot, equipItem);
         }
 
         return ToolResult.ok("Equipped " + foundMat.name().toLowerCase().replace('_', ' ') + " to " + slotName);

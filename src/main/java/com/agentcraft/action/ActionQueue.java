@@ -53,7 +53,7 @@ public class ActionQueue {
                     } catch (Exception e) {
                         plugin.getLogger().warning("[ActionQueue] onStart() crashed for "
                                 + current.getClass().getSimpleName() + ": " + e.getMessage());
-                        current = null;
+                        failCurrentQuietly();
                         return;
                     }
                 }
@@ -64,7 +64,7 @@ public class ActionQueue {
                 } catch (Exception e) {
                     plugin.getLogger().warning("[ActionQueue] tick() crashed for "
                             + current.getClass().getSimpleName() + ": " + e.getMessage());
-                    current = null;
+                    failCurrentQuietly();
                     return;
                 }
 
@@ -88,6 +88,19 @@ public class ActionQueue {
             }
         };
         runnable.runTaskTimer(plugin, 0L, 1L);
+    }
+
+    /**
+     * Give a crashed action its onFail() cleanup (stopping break animations,
+     * cancelling navigation, ...) before discarding it.
+     */
+    private void failCurrentQuietly() {
+        try {
+            current.onFail();
+        } catch (Exception e) {
+            plugin.getLogger().warning("[ActionQueue] onFail() error: " + e.getMessage());
+        }
+        current = null;
     }
 
     public void stop() {

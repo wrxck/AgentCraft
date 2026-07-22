@@ -4,10 +4,10 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 
 import java.io.InputStreamReader;
+import java.io.Reader;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.util.concurrent.CompletableFuture;
@@ -26,6 +26,9 @@ public class SkinFetcher {
         this.plugin = plugin;
     }
 
+    // Note: concurrent fetch() calls for the same name can each perform their
+    // own HTTP round-trip (the last one wins the cache slot). This is benign —
+    // both produce the same data — so no de-duplication is done here.
     public CompletableFuture<SkinData> fetch(String username) {
         SkinData cached = cache.get(username.toLowerCase());
         if (cached != null) {
@@ -40,7 +43,12 @@ public class SkinFetcher {
                 }
 
                 SkinData skin = resolveTextures(uuid);
-                cache.put(username.toLowerCase(), skin);
+                // Only cache real skins. Transient failures (rate limiting,
+                // Mojang hiccups) yield EMPTY; caching that would leave the
+                // NPC skinless until a server restart.
+                if (!skin.isEmpty()) {
+                    cache.put(username.toLowerCase(), skin);
+                }
                 return skin;
             } catch (Exception e) {
                 plugin.getLogger().log(Level.WARNING, "Failed to fetch skin for " + username, e);
@@ -49,41 +57,62 @@ public class SkinFetcher {
         });
     }
 
-    private String resolveUUID(String username) throws Exception {
+    String resolveUUID(String username) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) URI.create(UUID_URL + username).toURL().openConnection();
-        conn.setConnectTimeout(5000);
-        conn.setReadTimeout(5000);
+        try {
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
 
-        if (conn.getResponseCode() != 200) {
-            return null;
-        }
+            if (conn.getResponseCode() != 200) {
+                return null;
+            }
 
-        try (InputStreamReader reader = new InputStreamReader(conn.getInputStream())) {
-            JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
-            return json.get("id").getAsString();
+            try (InputStreamReader reader = new InputStreamReader(conn.getInputStream())) {
+                JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
+                return json.get("id").getAsString();
+            }
+        } finally {
+            // Always release the connection, including non-200 responses,
+            // or file descriptors leak under Mojang rate limiting.
+            conn.disconnect();
         }
     }
 
-    private SkinData resolveTextures(String uuid) throws Exception {
+    SkinData resolveTextures(String uuid) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) URI.create(PROFILE_URL + uuid + "?unsigned=false").toURL().openConnection();
-        conn.setConnectTimeout(5000);
-        conn.setReadTimeout(5000);
+        try {
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
 
-        if (conn.getResponseCode() != 200) {
+            if (conn.getResponseCode() != 200) {
+                return SkinData.EMPTY;
+            }
+
+            try (InputStreamReader reader = new InputStreamReader(conn.getInputStream())) {
+                return parseSkinResponse(reader);
+            }
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    /**
+     * Parse a Mojang session-server profile response into SkinData.
+     * Returns SkinData.EMPTY when the payload has no textures property.
+     */
+    static SkinData parseSkinResponse(Reader reader) {
+        JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
+        JsonArray properties = json.getAsJsonArray("properties");
+        if (properties == null) {
             return SkinData.EMPTY;
         }
 
-        try (InputStreamReader reader = new InputStreamReader(conn.getInputStream())) {
-            JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
-            JsonArray properties = json.getAsJsonArray("properties");
-
-            for (JsonElement element : properties) {
-                JsonObject prop = element.getAsJsonObject();
-                if ("textures".equals(prop.get("name").getAsString())) {
-                    String value = prop.get("value").getAsString();
-                    String signature = prop.has("signature") ? prop.get("signature").getAsString() : "";
-                    return new SkinData(value, signature);
-                }
+        for (JsonElement element : properties) {
+            JsonObject prop = element.getAsJsonObject();
+            if ("textures".equals(prop.get("name").getAsString())) {
+                String value = prop.get("value").getAsString();
+                String signature = prop.has("signature") ? prop.get("signature").getAsString() : "";
+                return new SkinData(value, signature);
             }
         }
 

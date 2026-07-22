@@ -15,6 +15,13 @@ public class WaypointManager {
 
     private static final int WAYPOINT_INTERVAL = 100;
 
+    /**
+     * Largest per-tick displacement still counted as travel. NPCs walk well
+     * under one block per tick; anything bigger is a teleport (corridor
+     * return, going home) and must not inflate the distance counter.
+     */
+    private static final double MAX_TICK_TRAVEL = 10.0;
+
     private final String agentName;
     private final List<ArmorStand> markers = new ArrayList<>();
 
@@ -30,7 +37,10 @@ public class WaypointManager {
 
     public void tick(Location currentLocation) {
         if (lastLocation != null && lastLocation.getWorld().equals(currentLocation.getWorld())) {
-            totalDistanceTraveled += lastLocation.distance(currentLocation);
+            double moved = lastLocation.distance(currentLocation);
+            if (moved <= MAX_TICK_TRAVEL) {
+                totalDistanceTraveled += moved;
+            }
         }
         lastLocation = currentLocation.clone();
 
@@ -62,5 +72,4 @@ public class WaypointManager {
     }
 
     public double getTotalDistanceTraveled() { return totalDistanceTraveled; }
-    public int getMarkerCount() { return markers.size(); }
 }

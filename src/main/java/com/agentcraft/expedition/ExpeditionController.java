@@ -5,6 +5,7 @@ import com.agentcraft.navigation.NavigationController;
 import com.agentcraft.npc.AgentEquipment;
 import com.agentcraft.npc.FakePlayer;
 import com.agentcraft.util.LocationUtil;
+import com.agentcraft.util.MaterialMatcher;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -14,6 +15,8 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -55,11 +58,14 @@ public class ExpeditionController {
     private int combatScanCooldown;
     private int eatingTimer;
 
+    // Items actually vacuumed into the NPC inventory during this expedition
+    // (material -> count); complete() drops these, and only these, at home.
+    private final Map<Material, Integer> collectedItems = new LinkedHashMap<>();
+
     // Gathering sub-state
     private Location gatherBlockLoc;
     private int breakStage = -1;
     private int stageCooldown;
-    private int collectDelay;
 
     // Search sub-state
     private boolean searchNavArrived;
@@ -70,7 +76,9 @@ public class ExpeditionController {
         this.ownerUuid = owner.getUniqueId();
         this.targetMaterial = targetMaterial.toUpperCase().replace(' ', '_');
         this.targetCount = targetCount;
-        this.category = MaterialCategory.resolve(targetMaterial);
+        // Resolve from the normalized name so "ancient debris" categorizes
+        // exactly like "ancient_debris".
+        this.category = MaterialCategory.resolve(this.targetMaterial);
         this.homeLocation = agent.getBehaviorController().getHomeLocation();
     }
 
@@ -134,7 +142,7 @@ public class ExpeditionController {
                         }
                     } else {
                         state = ExpeditionState.FLEEING;
-                        reporter.reportFleeing(3);
+                        reporter.reportFleeing(combatHandler.getLastThreatCount());
                     }
                     return;
                 }
@@ -292,6 +300,13 @@ public class ExpeditionController {
 
     private void tickGathering() {
         if (gatherBlockLoc == null) {
+            // Mission may already be fulfilled (e.g. the delayed collection
+            // ran while an interrupt was active and deferred the return).
+            if (gathered >= targetCount) {
+                reporter.reportReturning(gathered, targetMaterial);
+                startReturnHome();
+                return;
+            }
             // Find next block to gather
             Location found = scanForMaterial(agent.getNpc().getLocation(),
                     UNDERGROUND_SCAN_RADIUS, UNDERGROUND_SCAN_Y);
@@ -365,33 +380,58 @@ public class ExpeditionController {
             }
             block.breakNaturally();
             gear.usePickaxe();
-            collectDelay = 5;
 
             // Schedule collection
             Location dropLoc = gatherBlockLoc.clone();
             gatherBlockLoc = null;
             breakStage = -1;
 
-            Bukkit.getScheduler().runTaskLater(agent.getPlugin(), () -> {
-                collectDrops(dropLoc);
-                gathered++;
-                log("Gathered " + gathered + "/" + targetCount);
-
-                if (gathered >= targetCount) {
-                    reporter.reportReturning(gathered, targetMaterial);
-                    startReturnHome();
-                }
-            }, 5L);
+            Bukkit.getScheduler().runTaskLater(agent.getPlugin(),
+                    () -> finishGatherCollection(dropLoc), 5L);
         }
+    }
+
+    /**
+     * Runs 5 ticks after a gather block was broken: vacuum the drops and
+     * check whether the mission target has been met. Scheduled work must
+     * respect the current expedition state: it may run after the expedition
+     * was cancelled/failed or while an interrupt (combat/fleeing/eating) is
+     * active, and must never stomp those states.
+     */
+    void finishGatherCollection(Location dropLoc) {
+        if (isComplete()) {
+            // Expedition was cancelled or failed in the meantime.
+            return;
+        }
+
+        collectDrops(dropLoc);
+        gathered++;
+        log("Gathered " + gathered + "/" + targetCount);
+
+        if (gathered >= targetCount && canStartReturningHome()) {
+            reporter.reportReturning(gathered, targetMaterial);
+            startReturnHome();
+        }
+        // If an interrupt is active, tickGathering() picks the return up
+        // once the interrupt resolves back to GATHERING.
+    }
+
+    private boolean canStartReturningHome() {
+        return state != ExpeditionState.COMBAT
+                && state != ExpeditionState.FLEEING
+                && state != ExpeditionState.EATING
+                && state != ExpeditionState.RETURNING_HOME;
     }
 
     private void tickCombat() {
         combatHandler.tick();
 
         if (combatHandler.isDone()) {
-            if (combatHandler.getCurrentTarget() != null && combatHandler.getCurrentTarget().isDead()) {
-                reporter.reportCombat(
-                        combatHandler.getCurrentTarget().getType().name().toLowerCase(), true);
+            // The handler nulls its target before we can observe the kill,
+            // so it captures the victim's name for us.
+            String killedMob = combatHandler.consumeLastKillName();
+            if (killedMob != null) {
+                reporter.reportCombat(killedMob, true);
             }
             switchToPickaxe();
             state = stateBeforeInterrupt != null ? stateBeforeInterrupt : ExpeditionState.SEARCHING;
@@ -437,10 +477,7 @@ public class ExpeditionController {
 
         if (macroNavigator.hasFailed()) {
             // Teleport home as fallback
-            FakePlayer npc = agent.getNpc();
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                npc.teleport(viewer, homeLocation);
-            }
+            teleportNpcTo(homeLocation);
             complete();
         }
     }
@@ -456,10 +493,7 @@ public class ExpeditionController {
     public void cancelAndTeleportHome() {
         reporter.reportCancelled();
         cleanup();
-        FakePlayer npc = agent.getNpc();
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            npc.teleport(viewer, homeLocation);
-        }
+        teleportNpcTo(homeLocation);
         state = ExpeditionState.FAILED;
     }
 
@@ -467,12 +501,21 @@ public class ExpeditionController {
         reporter.reportDeath();
         cleanup();
         // Teleport home
-        FakePlayer npc = agent.getNpc();
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            npc.teleport(viewer, homeLocation);
-        }
+        teleportNpcTo(homeLocation);
         gathered = 0;
         state = ExpeditionState.FAILED;
+    }
+
+    /**
+     * Teleport the NPC for all viewers AND update its internal position
+     * exactly once, even when no players are online to receive packets.
+     */
+    private void teleportNpcTo(Location destination) {
+        FakePlayer npc = agent.getNpc();
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            npc.teleport(viewer, destination);
+        }
+        npc.setLocation(destination);
     }
 
     private void startReturnHome() {
@@ -480,21 +523,26 @@ public class ExpeditionController {
         state = ExpeditionState.RETURNING_HOME;
     }
 
-    private void complete() {
+    void complete() {
         double distance = waypointManager.getTotalDistanceTraveled();
         reporter.reportComplete(gathered, targetMaterial, distance);
 
         // Switch back to sword (default held item)
         switchToSword();
 
-        // Drop gathered items at home
-        for (int i = 0; i < gathered; i++) {
-            Material mat = matchMaterial(targetMaterial);
-            if (mat != null) {
+        // Drop the items that were actually collected during the expedition:
+        // transfer them out of the NPC's tracked inventory instead of
+        // manufacturing brand-new stacks (which duplicated every drop that
+        // collectDrops() had already vacuumed up).
+        for (Map.Entry<Material, Integer> entry : collectedItems.entrySet()) {
+            int removed = agent.getBehaviorController()
+                    .removeFromInventory(entry.getKey(), entry.getValue());
+            if (removed > 0) {
                 homeLocation.getWorld().dropItem(homeLocation,
-                        new org.bukkit.inventory.ItemStack(mat));
+                        new org.bukkit.inventory.ItemStack(entry.getKey(), removed));
             }
         }
+        collectedItems.clear();
 
         cleanup();
         state = ExpeditionState.COMPLETED;
@@ -525,7 +573,7 @@ public class ExpeditionController {
 
     // --- Helpers ---
 
-    private Location scanForMaterial(Location center, int radius, int yRange) {
+    Location scanForMaterial(Location center, int radius, int yRange) {
         World world = center.getWorld();
         int cx = center.getBlockX();
         int cy = center.getBlockY();
@@ -538,8 +586,7 @@ public class ExpeditionController {
             for (int y = -yRange; y <= yRange; y++) {
                 for (int z = -radius; z <= radius; z++) {
                     Block b = world.getBlockAt(cx + x, cy + y, cz + z);
-                    String name = b.getType().name();
-                    if (name.contains(targetMaterial) || name.equalsIgnoreCase(targetMaterial)) {
+                    if (MaterialMatcher.matches(b.getType(), targetMaterial)) {
                         double distSq = b.getLocation().distanceSquared(center);
                         if (distSq < nearestDistSq) {
                             nearestDistSq = distSq;
@@ -557,7 +604,9 @@ public class ExpeditionController {
         Location center = dropLoc.clone().add(0.5, 0.5, 0.5);
         for (Entity entity : center.getWorld().getNearbyEntities(center, 2, 2, 2)) {
             if (entity instanceof Item item) {
-                agent.getBehaviorController().addToInventory(item.getItemStack().clone());
+                org.bukkit.inventory.ItemStack stack = item.getItemStack().clone();
+                agent.getBehaviorController().addToInventory(stack);
+                collectedItems.merge(stack.getType(), stack.getAmount(), Integer::sum);
                 item.remove();
             }
         }
@@ -571,21 +620,6 @@ public class ExpeditionController {
         double tz = npcLoc.getZ() + Math.sin(angle) * distance;
         return LocationUtil.findSafeGround(
                 new Location(npcLoc.getWorld(), tx, npcLoc.getY(), tz));
-    }
-
-    private Material matchMaterial(String name) {
-        // Try exact match first
-        try {
-            return Material.valueOf(name);
-        } catch (IllegalArgumentException ignored) {}
-
-        // Try partial match
-        for (Material mat : Material.values()) {
-            if (mat.name().contains(name) && mat.isItem()) {
-                return mat;
-            }
-        }
-        return null;
     }
 
     private void log(String msg) {

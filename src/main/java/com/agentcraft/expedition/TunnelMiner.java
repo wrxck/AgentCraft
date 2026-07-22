@@ -16,8 +16,6 @@ import org.bukkit.entity.Player;
  */
 public class TunnelMiner {
 
-    private static final int BREAK_STAGES = 10;
-    private static final int TICKS_PER_STAGE = 2; // Faster with Efficiency V
     private static final int TORCH_INTERVAL = 8;
     private static final int CAVE_AIR_THRESHOLD = 6;
     private static final int MOVE_TICKS = 8;
@@ -25,7 +23,7 @@ public class TunnelMiner {
     public enum State { IDLE, MINING_FACE, MOVING_FORWARD, PLACING_TORCH, ARRIVED, CAVE_FOUND }
 
     private final AIAgent agent;
-    private final NPCGear gear;
+    private final BlockBreaker breaker;
     private final int targetY;
     private final int dirX;
     private final int dirZ;
@@ -33,15 +31,13 @@ public class TunnelMiner {
     private final int perpZ;
 
     private State state = State.IDLE;
-    private int breakStage = -1;
-    private int stageCooldown;
     private int blocksMined;
-    private Location currentBreakLoc;
     private Location caveLocation;
 
     // 3x3 face mining
     private Location[] faceBlocks;
     private int faceIndex;
+    private int faceInitialAirCount;
 
     // Smooth movement
     private double moveDx, moveDy, moveDz;
@@ -51,7 +47,7 @@ public class TunnelMiner {
 
     public TunnelMiner(AIAgent agent, NPCGear gear, int targetY) {
         this.agent = agent;
-        this.gear = gear;
+        this.breaker = new BlockBreaker(agent, gear);
         this.targetY = targetY;
 
         // Pick a consistent cardinal direction based on NPC yaw
@@ -73,8 +69,6 @@ public class TunnelMiner {
 
     public void start() {
         state = State.MINING_FACE;
-        breakStage = -1;
-        stageCooldown = 0;
         blocksMined = 0;
         calculateFaceBlocks();
     }
@@ -86,7 +80,7 @@ public class TunnelMiner {
 
         // Check if we've reached target Y
         if (npcLoc.getBlockY() <= targetY) {
-            cancelBreakAnimation();
+            breaker.cancelBreakAnimation();
             state = State.ARRIVED;
             return;
         }
@@ -106,34 +100,31 @@ public class TunnelMiner {
      */
     private void calculateFaceBlocks() {
         Location npcLoc = agent.getNpc().getLocation();
-        int bx = npcLoc.getBlockX() + dirX;
-        int by = npcLoc.getBlockY() - 1; // Bottom of the step-down
-        int bz = npcLoc.getBlockZ() + dirZ;
+        int[][] coords = MiningFaces.descendingFace(
+                npcLoc.getBlockX(), npcLoc.getBlockY(), npcLoc.getBlockZ(),
+                dirX, dirZ, perpX, perpZ);
 
-        // Sweep pattern: top to bottom, left to right
-        faceBlocks = new Location[9];
-        int idx = 0;
-        for (int row = 2; row >= 0; row--) { // top to bottom
-            for (int col = -1; col <= 1; col++) { // left to right
-                int fx = bx + perpX * col;
-                int fy = by + row;
-                int fz = bz + perpZ * col;
-                faceBlocks[idx++] = new Location(npcLoc.getWorld(), fx, fy, fz);
-            }
+        faceBlocks = new Location[coords.length];
+        for (int i = 0; i < coords.length; i++) {
+            faceBlocks[i] = new Location(npcLoc.getWorld(), coords[i][0], coords[i][1], coords[i][2]);
         }
         faceIndex = 0;
-        breakStage = -1;
-        stageCooldown = 0;
+        breaker.reset();
+
+        // Snapshot how many face blocks are open BEFORE we mine any of them.
+        // Cave detection must only consider pre-existing air; otherwise the
+        // blocks we break ourselves would trip the threshold on every face.
+        faceInitialAirCount = 0;
+        for (Location loc : faceBlocks) {
+            if (!loc.getBlock().getType().isSolid()) faceInitialAirCount++;
+        }
     }
 
     private void tickMiningFace() {
-        // Check for cave: count how many of the 9 face blocks are air
-        int airCount = 0;
-        for (Location loc : faceBlocks) {
-            if (!loc.getBlock().getType().isSolid()) airCount++;
-        }
-        if (airCount >= CAVE_AIR_THRESHOLD) {
-            cancelBreakAnimation();
+        // Check for cave: how many of the 9 face blocks were already open
+        // when the face was computed (self-mined blocks excluded).
+        if (faceInitialAirCount >= CAVE_AIR_THRESHOLD) {
+            breaker.cancelBreakAnimation();
             // Cave entrance center
             Location center = faceBlocks[4]; // middle block
             caveLocation = new Location(center.getWorld(),
@@ -158,15 +149,14 @@ public class TunnelMiner {
 
         // Mine the current block
         Location blockLoc = faceBlocks[faceIndex];
-        if (tickBreakBlock(blockLoc)) {
+        if (breaker.tickBreakBlock(blockLoc)) {
             faceIndex++;
-            breakStage = -1;
-            stageCooldown = 0;
+            breaker.reset();
         }
     }
 
     private void startMovingForward() {
-        cancelBreakAnimation();
+        breaker.cancelBreakAnimation();
         Location npcLoc = agent.getNpc().getLocation();
         double tx = npcLoc.getBlockX() + dirX + 0.5;
         double ty = npcLoc.getBlockY() - 1;
@@ -191,6 +181,9 @@ public class TunnelMiner {
             for (Player viewer : Bukkit.getOnlinePlayers()) {
                 npc.teleport(viewer, moveTarget);
             }
+            // Update the NPC's internal position exactly once, even when no
+            // players are online to receive teleport packets.
+            npc.setLocation(moveTarget);
 
             // Place torch every N blocks
             if (blocksMined % (TORCH_INTERVAL * 9) == 0 && blocksMined > 0) {
@@ -233,54 +226,10 @@ public class TunnelMiner {
         calculateFaceBlocks();
     }
 
-    private boolean tickBreakBlock(Location blockLoc) {
-        FakePlayer npc = agent.getNpc();
-
-        // Look at the block
-        Location blockCenter = blockLoc.clone().add(0.5, 0.5, 0.5);
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            npc.lookAt(viewer, blockCenter);
-        }
-
-        if (stageCooldown > 0) {
-            stageCooldown--;
-            return false;
-        }
-
-        breakStage++;
-        stageCooldown = TICKS_PER_STAGE;
-
-        if (breakStage < BREAK_STAGES) {
-            currentBreakLoc = blockLoc;
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                npc.swingArm(viewer);
-                npc.breakBlockAnimation(viewer, blockLoc, breakStage);
-            }
-            return false;
-        } else {
-            // Break complete
-            cancelBreakAnimation();
-            blockLoc.getBlock().breakNaturally();
-            gear.usePickaxe();
-            currentBreakLoc = null;
-            return true;
-        }
-    }
-
-    private void cancelBreakAnimation() {
-        if (currentBreakLoc != null) {
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                agent.getNpc().breakBlockAnimation(viewer, currentBreakLoc, -1);
-            }
-            currentBreakLoc = null;
-        }
-    }
-
     public State getState() { return state; }
     public boolean isArrived() { return state == State.ARRIVED; }
     public boolean isCaveFound() { return state == State.CAVE_FOUND; }
     public Location getCaveLocation() { return caveLocation; }
-    public int getBlocksMined() { return blocksMined; }
     public int getDirX() { return dirX; }
     public int getDirZ() { return dirZ; }
     public int getPerpX() { return perpX; }

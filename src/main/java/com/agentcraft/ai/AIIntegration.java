@@ -16,7 +16,8 @@ public class AIIntegration {
 
     private final AgentCraftPlugin plugin;
     private final RateLimiter rateLimiter;
-    private final Map<String, ClaudeClient> clients = new ConcurrentHashMap<>();
+    // Package-private for tests.
+    final Map<String, ClaudeClient> clients = new ConcurrentHashMap<>();
 
     public AIIntegration(AgentCraftPlugin plugin) {
         this.plugin = plugin;
@@ -27,15 +28,15 @@ public class AIIntegration {
     }
 
     public void submitTask(AIAgent agent, Player requester, String task) {
-        // Rate limit check
-        if (!rateLimiter.tryConsume(requester.getUniqueId())) {
-            MessageUtil.send(requester, MessageUtil.error("Rate limit reached. Please wait before submitting another task."));
+        // Check if agent is busy first — a busy rejection must not cost a token
+        if (agent.getState() == AgentState.THINKING || agent.getState() == AgentState.WORKING) {
+            MessageUtil.send(requester, MessageUtil.warning("Agent is busy. Use /agent stop " + agent.getNpc().getName() + " first."));
             return;
         }
 
-        // Check if agent is busy
-        if (agent.getState() == AgentState.THINKING || agent.getState() == AgentState.WORKING) {
-            MessageUtil.send(requester, MessageUtil.warning("Agent is busy. Use /agent stop " + agent.getNpc().getName() + " first."));
+        // Rate limit check
+        if (!rateLimiter.tryConsume(requester.getUniqueId())) {
+            MessageUtil.send(requester, MessageUtil.error("Rate limit reached. Please wait before submitting another task."));
             return;
         }
 
@@ -71,7 +72,19 @@ public class AIIntegration {
             }
         }).handle((exitCode, throwable) -> {
             Bukkit.getScheduler().runTask(plugin, () -> {
-                clients.remove(agent.getNpc().getName().toLowerCase());
+                // Only clean up if this client is still the registered one — a
+                // newer task may have replaced it while this exit was in flight.
+                boolean stillRegistered = clients.remove(
+                        agent.getNpc().getName().toLowerCase(), client);
+
+                if (throwable != null) {
+                    plugin.getLogger().warning("[AI] Task for " + agent.getNpc().getName()
+                            + " completed exceptionally: " + throwable.getMessage());
+                }
+
+                if (!stillRegistered) {
+                    return;
+                }
 
                 int code = (exitCode != null) ? exitCode : -1;
 
@@ -89,11 +102,6 @@ public class AIIntegration {
                                     agent.getNpc().getName() + "'s task failed (exit code " + code + ")."));
                         }
                     }
-                }
-
-                if (throwable != null) {
-                    plugin.getLogger().warning("[AI] Task for " + agent.getNpc().getName()
-                            + " completed exceptionally: " + throwable.getMessage());
                 }
 
                 agent.getBehaviorController().clearTaskRequester();

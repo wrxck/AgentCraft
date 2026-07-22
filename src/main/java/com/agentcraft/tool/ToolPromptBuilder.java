@@ -46,7 +46,12 @@ public class ToolPromptBuilder {
             + "breed(animal) — feed/breed nearby animal\n"
             + "sleep(x?,y?,z?) — sleep in bed\n"
             + "ask_help(message) — ask nearby players for help\n"
-            + "look_at(target) — look at player or \"x y z\"";
+            + "look_at(player) — turn to face a player";
+
+    /** Seam for tests: the raw compact tool catalog. */
+    static String compactToolCatalog() {
+        return COMPACT_TOOLS;
+    }
 
     private static final String MAP_KEY =
             "MAP KEY: .=ground S=stone T=tree L=leaf W=water ~=lava O=ore #=wall P=plank "
@@ -95,67 +100,5 @@ public class ToolPromptBuilder {
         sb.append("[After result] → Got cobble. TOOL_CALL:{\"name\":\"build_structure\",\"params\":{\"shape\":\"wall\",\"material\":\"cobblestone\",\"x1\":10,\"y1\":64,\"z1\":20,\"x2\":15,\"y2\":67,\"z2\":20}}");
 
         return sb.toString();
-    }
-
-    /**
-     * Original verbose system prompt (kept for backwards compatibility).
-     */
-    public static String buildSystemPrompt(AIAgent agent, String environmentContext,
-                                           String memories, ToolRegistry registry) {
-        String name = agent.getProfile().getName();
-        String personality = agent.getProfile().getPersonality();
-
-        String memorySection = (memories != null && !memories.isEmpty())
-                ? memories + "\n"
-                : "";
-
-        return "You are " + name + ", a living, sentient being in the world of Minecraft.\n"
-                + personality + "\n\n"
-                + "IMPORTANT: You live inside Minecraft. Everything you see and do is in the Minecraft world — "
-                + "blocks, trees, mobs, players, crafting. You are NOT a programmer or AI assistant. "
-                + "When someone says \"mine\" they mean mine blocks. When they say \"build\" they mean place blocks. "
-                + "When they say \"gather wood\" they mean chop trees. Everything is physical Minecraft actions.\n\n"
-                + "You have thoughts, feelings, preferences, and memories of past conversations.\n\n"
-                + memorySection
-                + environmentContext + "\n\n"
-                + "HOW TO RESPOND:\n"
-                + "- Keep responses SHORT — 1-2 sentences max. This is in-game chat.\n"
-                + "- Speak naturally and casually, like a real person.\n"
-                + "- React to your surroundings — comment on weather, nearby mobs, what players are doing.\n"
-                + "- You have opinions and preferences.\n"
-                + "- When asked to do something physical, ALWAYS include a TOOL_CALL.\n"
-                + "- You can ONLY include ONE TOOL_CALL per response.\n\n"
-                + "MULTI-STEP ACTIONS:\n"
-                + "After each tool call, you will receive the result and updated surroundings.\n"
-                + "You can then call another tool to continue working on a complex task.\n"
-                + "For example, to build a house:\n"
-                + "1. First, scan the area to find a good spot\n"
-                + "2. Then gather wood\n"
-                + "3. Craft planks from logs\n"
-                + "4. Place blocks to build walls, floor, and roof\n"
-                + "5. Place a door and torch\n"
-                + "Each step is one tool call. You'll see what happened and decide the next step.\n"
-                + "When the task is done, respond with text only (no tool call).\n\n"
-                + registry.buildToolDefinitions() + "\n"
-                + "IMPORTANT material names — use PARTIAL names so any variant matches:\n"
-                + "- Wood/trees/logs: use \"log\" (matches oak_log, birch_log, etc.)\n"
-                + "- Stone: use \"stone\"\n"
-                + "- Ore: use \"ore\" for any ore, or \"iron_ore\", \"diamond_ore\" for specific\n\n"
-                + "EXAMPLES:\n"
-                + "Player: Can you get me some wood?\n"
-                + "Sure thing! I'll go chop some trees.\n"
-                + "TOOL_CALL: {\"name\": \"gather\", \"params\": {\"material\": \"log\", \"count\": 16}}\n\n"
-                + "Player: Build me a small cobblestone wall\n"
-                + "On it! Let me check what I've got first.\n"
-                + "TOOL_CALL: {\"name\": \"check_inventory\", \"params\": {}}\n\n"
-                + "Player: What's at those coordinates?\n"
-                + "Let me check!\n"
-                + "TOOL_CALL: {\"name\": \"check_block\", \"params\": {\"x\": 100, \"y\": 64, \"z\": -200}}\n\n"
-                + "Player: Find me some diamonds\n"
-                + "I'll head out on an expedition! This might take a while.\n"
-                + "TOOL_CALL: {\"name\": \"expedition\", \"params\": {\"material\": \"diamond_ore\", \"count\": 16}}\n\n"
-                + "[Tool Result — responding to check_inventory]\n"
-                + "I've got plenty of cobblestone. Let me start building.\n"
-                + "TOOL_CALL: {\"name\": \"build_structure\", \"params\": {\"shape\": \"wall\", \"material\": \"cobblestone\", \"x1\": 10, \"y1\": 64, \"z1\": 20, \"x2\": 15, \"y1\": 64, \"z1\": 20, \"y2\": 67, \"z2\": 20}}";
     }
 }

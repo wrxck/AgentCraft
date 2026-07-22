@@ -2,9 +2,9 @@ package com.agentcraft.expedition;
 
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.npc.FakePlayer;
+import com.agentcraft.util.MaterialMatcher;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
-import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
@@ -16,8 +16,6 @@ import org.bukkit.entity.Player;
  */
 public class BranchMiner {
 
-    private static final int BREAK_STAGES = 10;
-    private static final int TICKS_PER_STAGE = 2;
     private static final int BRANCH_INTERVAL = 3;
     private static final int BRANCH_LENGTH = 16;
     private static final int SCAN_RADIUS = 2;
@@ -26,11 +24,11 @@ public class BranchMiner {
 
     public enum State {
         IDLE, MINING_CORRIDOR, TURNING, MINING_BRANCH,
-        RETURNING_TO_CORRIDOR, SCANNING, FOUND_TARGET, EXHAUSTED
+        SCANNING, FOUND_TARGET, EXHAUSTED
     }
 
     private final AIAgent agent;
-    private final NPCGear gear;
+    private final BlockBreaker breaker;
     private final String targetMaterial;
     private final int dirX;
     private final int dirZ;
@@ -46,9 +44,6 @@ public class BranchMiner {
     // Mining sub-state
     private Location[] faceBlocks;
     private int faceIndex;
-    private int breakStage = -1;
-    private int stageCooldown;
-    private Location currentBreakLoc;
 
     // Branch 1x2 mining
     private Location[] branchBlocks;
@@ -64,7 +59,7 @@ public class BranchMiner {
     public BranchMiner(AIAgent agent, NPCGear gear, String targetMaterial,
                        int dirX, int dirZ, int perpX, int perpZ) {
         this.agent = agent;
-        this.gear = gear;
+        this.breaker = new BlockBreaker(agent, gear);
         this.targetMaterial = targetMaterial.toUpperCase().replace(' ', '_');
         this.dirX = dirX;
         this.dirZ = dirZ;
@@ -86,7 +81,6 @@ public class BranchMiner {
             case MINING_CORRIDOR -> tickMiningCorridor();
             case TURNING -> tickMoving();
             case MINING_BRANCH -> tickMiningBranch();
-            case RETURNING_TO_CORRIDOR -> tickMoving();
             case SCANNING -> tickScanning();
             default -> {}
         }
@@ -94,24 +88,17 @@ public class BranchMiner {
 
     private void calculateCorridorFace() {
         Location npcLoc = agent.getNpc().getLocation();
-        int bx = npcLoc.getBlockX() + dirX;
-        int by = npcLoc.getBlockY();
-        int bz = npcLoc.getBlockZ() + dirZ;
-
         // 3x3 face at current Y level (no descent)
-        faceBlocks = new Location[9];
-        int idx = 0;
-        for (int row = 2; row >= 0; row--) {
-            for (int col = -1; col <= 1; col++) {
-                int fx = bx + perpX * col;
-                int fy = by - 1 + row;
-                int fz = bz + perpZ * col;
-                faceBlocks[idx++] = new Location(npcLoc.getWorld(), fx, fy, fz);
-            }
+        int[][] coords = MiningFaces.flatFace(
+                npcLoc.getBlockX(), npcLoc.getBlockY(), npcLoc.getBlockZ(),
+                dirX, dirZ, perpX, perpZ);
+
+        faceBlocks = new Location[coords.length];
+        for (int i = 0; i < coords.length; i++) {
+            faceBlocks[i] = new Location(npcLoc.getWorld(), coords[i][0], coords[i][1], coords[i][2]);
         }
         faceIndex = 0;
-        breakStage = -1;
-        stageCooldown = 0;
+        breaker.reset();
     }
 
     private void tickMiningCorridor() {
@@ -142,10 +129,9 @@ public class BranchMiner {
         }
 
         Location blockLoc = faceBlocks[faceIndex];
-        if (tickBreakBlock(blockLoc)) {
+        if (breaker.tickBreakBlock(blockLoc)) {
             faceIndex++;
-            breakStage = -1;
-            stageCooldown = 0;
+            breaker.reset();
         }
     }
 
@@ -180,8 +166,7 @@ public class BranchMiner {
                 new Location(npcLoc.getWorld(), bx, by + 1, bz)
         };
         branchBlockIndex = 0;
-        breakStage = -1;
-        stageCooldown = 0;
+        breaker.reset();
         state = State.MINING_BRANCH;
     }
 
@@ -237,21 +222,19 @@ public class BranchMiner {
                     new Location(npcLoc.getWorld(), bx, by + 1, bz)
             };
             branchBlockIndex = 0;
-            breakStage = -1;
-            stageCooldown = 0;
+            breaker.reset();
             return;
         }
 
         Location blockLoc = branchBlocks[branchBlockIndex];
-        if (tickBreakBlock(blockLoc)) {
+        if (breaker.tickBreakBlock(blockLoc)) {
             branchBlockIndex++;
-            breakStage = -1;
-            stageCooldown = 0;
+            breaker.reset();
         }
     }
 
-    private void returnToCorridor() {
-        cancelBreakAnimation();
+    void returnToCorridor() {
+        breaker.cancelBreakAnimation();
         // Teleport back to corridor position (branches are exploratory)
         Location npcLoc = agent.getNpc().getLocation();
         int bDirX = perpX * branchSide;
@@ -266,9 +249,12 @@ public class BranchMiner {
         for (Player viewer : Bukkit.getOnlinePlayers()) {
             npc.teleport(viewer, corridorPos);
         }
+        // Update the NPC's internal position exactly once, even when no
+        // players are online to receive teleport packets.
+        npc.setLocation(corridorPos);
     }
 
-    private Location scanForTarget(Location center) {
+    Location scanForTarget(Location center) {
         World world = center.getWorld();
         int cx = center.getBlockX();
         int cy = center.getBlockY();
@@ -281,8 +267,7 @@ public class BranchMiner {
             for (int y = -SCAN_RADIUS; y <= SCAN_RADIUS; y++) {
                 for (int z = -SCAN_RADIUS; z <= SCAN_RADIUS; z++) {
                     Block b = world.getBlockAt(cx + x, cy + y, cz + z);
-                    String name = b.getType().name();
-                    if (name.contains(targetMaterial) || name.equalsIgnoreCase(targetMaterial)) {
+                    if (MaterialMatcher.matches(b.getType(), targetMaterial)) {
                         double distSq = b.getLocation().distanceSquared(center);
                         if (distSq < nearestDistSq) {
                             nearestDistSq = distSq;
@@ -318,6 +303,9 @@ public class BranchMiner {
             for (Player viewer : Bukkit.getOnlinePlayers()) {
                 npc.teleport(viewer, moveTarget);
             }
+            // Update the NPC's internal position exactly once, even when no
+            // players are online to receive teleport packets.
+            npc.setLocation(moveTarget);
 
             state = afterMove;
             if (state == State.MINING_CORRIDOR) {
@@ -332,47 +320,6 @@ public class BranchMiner {
         }
         npc.updatePosition(moveDx, moveDy, moveDz, moveYaw, 0);
         moveTicksRemaining--;
-    }
-
-    private boolean tickBreakBlock(Location blockLoc) {
-        FakePlayer npc = agent.getNpc();
-
-        Location blockCenter = blockLoc.clone().add(0.5, 0.5, 0.5);
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            npc.lookAt(viewer, blockCenter);
-        }
-
-        if (stageCooldown > 0) {
-            stageCooldown--;
-            return false;
-        }
-
-        breakStage++;
-        stageCooldown = TICKS_PER_STAGE;
-
-        if (breakStage < BREAK_STAGES) {
-            currentBreakLoc = blockLoc;
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                npc.swingArm(viewer);
-                npc.breakBlockAnimation(viewer, blockLoc, breakStage);
-            }
-            return false;
-        } else {
-            cancelBreakAnimation();
-            blockLoc.getBlock().breakNaturally();
-            gear.usePickaxe();
-            currentBreakLoc = null;
-            return true;
-        }
-    }
-
-    private void cancelBreakAnimation() {
-        if (currentBreakLoc != null) {
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                agent.getNpc().breakBlockAnimation(viewer, currentBreakLoc, -1);
-            }
-            currentBreakLoc = null;
-        }
     }
 
     public State getState() { return state; }

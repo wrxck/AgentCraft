@@ -24,21 +24,4 @@ public class ToolRegistry {
     public boolean has(String name) {
         return tools.containsKey(name);
     }
-
-    /**
-     * Builds a tool catalog string for inclusion in the system prompt.
-     */
-    public String buildToolDefinitions() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("AVAILABLE TOOLS:\n");
-        sb.append("When you want to perform a physical action, include a tool call on a new line:\n");
-        sb.append("TOOL_CALL: {\"name\": \"tool_name\", \"params\": {\"param1\": \"value1\"}}\n\n");
-
-        for (MinecraftTool tool : tools.values()) {
-            sb.append("- ").append(tool.getName()).append(": ").append(tool.getDescription()).append("\n");
-            sb.append("  params: ").append(tool.getParameterSchema().toString()).append("\n");
-        }
-
-        return sb.toString();
-    }
 }

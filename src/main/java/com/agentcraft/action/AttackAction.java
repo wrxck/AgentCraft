@@ -19,6 +19,7 @@ public class AttackAction extends Action {
     private int cooldown;
     private int totalTicks;
     private boolean chasing;
+    private boolean hitLanded;
 
     public AttackAction(AIAgent agent, LivingEntity target) {
         super(agent);
@@ -39,20 +40,31 @@ public class AttackAction extends Action {
         if (target instanceof Player) return ActionResult.FAILED;
 
         totalTicks++;
-        if (totalTicks > TIMEOUT_TICKS) return ActionResult.SUCCESS; // timeout, stop trying
+        if (totalTicks > TIMEOUT_TICKS) {
+            // Timing out after landing at least one hit is a (partial) success;
+            // timing out without ever reaching the target is a failure.
+            return hitLanded ? ActionResult.SUCCESS : ActionResult.FAILED;
+        }
 
         if (target.isDead()) return ActionResult.SUCCESS;
 
         FakePlayer npc = agent.getNpc();
+        // Cross-world guard: distance() throws on cross-world locations.
+        if (!npc.getLocation().getWorld().equals(target.getLocation().getWorld())) {
+            return ActionResult.FAILED;
+        }
         double dist = npc.getLocation().distance(target.getLocation());
 
         // Chase if too far
         if (dist > ATTACK_REACH) {
-            if (!chasing) {
+            NavigationController nav = agent.getBehaviorController().getNavigation();
+            // (Re)start the chase when not chasing yet, or when navigation died
+            // (e.g. pathing failed) while the target is still out of reach —
+            // otherwise the NPC freezes until the timeout.
+            if (!chasing || !nav.isNavigating()) {
                 startChase();
             }
             // Update goal if target moved
-            NavigationController nav = agent.getBehaviorController().getNavigation();
             nav.updateGoalIfMoved(target.getLocation());
             return ActionResult.CONTINUE;
         }
@@ -79,6 +91,7 @@ public class AttackAction extends Action {
             npc.swingArm(viewer);
         }
         target.damage(ATTACK_DAMAGE);
+        hitLanded = true;
 
         if (target.isDead()) return ActionResult.SUCCESS;
 

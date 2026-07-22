@@ -11,13 +11,6 @@ public class MessageUtil {
         player.sendMessage(PREFIX + message);
     }
 
-    public static void sendAll(Iterable<? extends Player> players, String message) {
-        String formatted = PREFIX + message;
-        for (Player player : players) {
-            player.sendMessage(formatted);
-        }
-    }
-
     public static String info(String message) {
         return ChatColor.WHITE + message;
     }

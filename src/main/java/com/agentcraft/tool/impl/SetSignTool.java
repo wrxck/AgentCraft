@@ -2,6 +2,7 @@ package com.agentcraft.tool.impl;
 
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.tool.MinecraftTool;
+import com.agentcraft.tool.ToolArgs;
 import com.agentcraft.tool.ToolResult;
 import com.google.gson.JsonObject;
 import org.bukkit.Location;
@@ -32,13 +33,18 @@ public class SetSignTool implements MinecraftTool {
     }
 
     @Override public ToolResult execute(AIAgent agent, JsonObject params) {
-        if (!params.has("x") || !params.has("y") || !params.has("z")) {
-            return ToolResult.fail("Must provide x, y, z coordinates");
+        try {
+            return run(agent, params);
+        } catch (ToolArgs.BadArgument e) {
+            return ToolResult.fail(e.getMessage());
         }
+    }
 
-        int x = params.get("x").getAsInt();
-        int y = params.get("y").getAsInt();
-        int z = params.get("z").getAsInt();
+    private ToolResult run(AIAgent agent, JsonObject params) {
+        int[] coords = ToolArgs.coords(params);
+        int x = coords[0];
+        int y = coords[1];
+        int z = coords[2];
 
         Location npcLoc = agent.getNpc().getLocation();
         double dist = Math.sqrt(Math.pow(x - npcLoc.getX(), 2)
@@ -52,8 +58,13 @@ public class SetSignTool implements MinecraftTool {
         World world = npcLoc.getWorld();
         Block block = world.getBlockAt(x, y, z);
 
-        // Place sign if not already a sign
+        // Edit an existing sign in place; otherwise only place a new sign into
+        // air — never silently destroy whatever block is already there.
         if (!(block.getState() instanceof Sign)) {
+            if (!block.getType().isAir()) {
+                return ToolResult.fail("There is already a block at " + x + " " + y + " " + z
+                        + " (" + block.getType().name().toLowerCase().replace('_', ' ') + ")");
+            }
             block.setType(Material.OAK_SIGN);
         }
 

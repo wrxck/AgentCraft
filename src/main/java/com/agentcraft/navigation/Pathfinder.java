@@ -178,14 +178,23 @@ public class Pathfinder {
         return Integer.MIN_VALUE;
     }
 
+    // Cheapest possible vertical cost per block of |dy| in the cost model above:
+    // a step down adds 0.3 per block, a step up adds 0.5 per move (min 0.3).
+    private static final double MIN_VERTICAL_COST = 0.3;
+
     private static double heuristic(PathNode a, PathNode b) {
-        // Octile distance - admissible for 8-directional movement
-        int dx = Math.abs(a.x - b.x);
-        int dy = Math.abs(a.y - b.y);
-        int dz = Math.abs(a.z - b.z);
+        // Octile XZ distance to the goal acceptance region (the goal is accepted
+        // within +-1 in x/z and +-2 in y, so subtract those tolerances), plus
+        // MIN_VERTICAL_COST per remaining block of |dy|. Charging the full 1.0
+        // per |dy| block would overestimate the real vertical costs (0.5 bundled
+        // step-up / 0.3 per block down), making the heuristic inadmissible and
+        // the paths found on slopes suboptimal.
+        int dx = Math.max(0, Math.abs(a.x - b.x) - 1);
+        int dy = Math.max(0, Math.abs(a.y - b.y) - 2);
+        int dz = Math.max(0, Math.abs(a.z - b.z) - 1);
         int dMin = Math.min(dx, dz);
         int dMax = Math.max(dx, dz);
-        return (SQRT2 - 1) * dMin + dMax + dy;
+        return (SQRT2 - 1) * dMin + dMax + MIN_VERTICAL_COST * dy;
     }
 
     private static List<PathNode> reconstructPath(PathNode end) {

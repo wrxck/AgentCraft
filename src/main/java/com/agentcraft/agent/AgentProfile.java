@@ -71,16 +71,21 @@ public class AgentProfile {
             }
         }
 
-        // Support both single "name"/"skin" and list "names"/"skins"
-        if (config.isList("names")) {
-            profile.names = config.getStringList("names");
+        // Support both single "name"/"skin" and list "names"/"skins".
+        // An EMPTY list is treated like a missing key: fall back to the single
+        // form / defaults instead of failing with IndexOutOfBoundsException
+        // (which would abort plugin enable).
+        List<String> nameList = config.isList("names") ? config.getStringList("names") : List.of();
+        if (!nameList.isEmpty()) {
+            profile.names = nameList;
         } else {
             profile.names = new ArrayList<>();
             profile.names.add(config.getString("name", profileId));
         }
 
-        if (config.isList("skins")) {
-            profile.skins = config.getStringList("skins");
+        List<String> skinList = config.isList("skins") ? config.getStringList("skins") : List.of();
+        if (!skinList.isEmpty()) {
+            profile.skins = skinList;
         } else {
             profile.skins = new ArrayList<>();
             profile.skins.add(config.getString("skin", "Steve"));

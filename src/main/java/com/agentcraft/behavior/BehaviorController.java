@@ -8,6 +8,7 @@ import com.agentcraft.expedition.ExpeditionController;
 import com.agentcraft.navigation.NavigationController;
 import com.agentcraft.npc.FakePlayer;
 import com.agentcraft.util.LocationUtil;
+import com.agentcraft.util.MaterialMatcher;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -791,6 +792,9 @@ public class BehaviorController {
         wanderTarget = null;
         resetGatherState();
         giveTarget = null;
+        // Clear followTarget too: finishFleeing() sets STANDING, so an orphaned
+        // followTarget would keep isBusy() true forever.
+        followTarget = null;
     }
 
     private void tickFleeing() {
@@ -1172,7 +1176,22 @@ public class BehaviorController {
     }
 
     private void parseGatherAction(String arg) {
-        // Format: "material [count]" e.g. "oak_log 10" or "oak_log" (defaults to 16)
+        MaterialRequest request = parseMaterialCount(arg);
+        GatherAction gatherAction = new GatherAction(agent, request.material(), request.count());
+        agent.getActionQueue().add(gatherAction);
+        agent.getActionQueue().start();
+    }
+
+    /** Parsed "material [count]" argument, e.g. "oak_log 10" or "oak_log" (count defaults to 16). */
+    record MaterialRequest(String material, int count) {}
+
+    /**
+     * Parse a "material [count]" argument. If the last token is a number it is
+     * the count and the remaining tokens (joined with underscores) form the
+     * material name; otherwise the whole argument is the material name and the
+     * count defaults to 16.
+     */
+    static MaterialRequest parseMaterialCount(String arg) {
         String[] parts = arg.trim().split("\\s+");
         String matName = parts[0];
         int count = 16; // default
@@ -1192,13 +1211,10 @@ public class BehaviorController {
                 matName = String.join("_", parts);
             }
         }
-
-        GatherAction gatherAction = new GatherAction(agent, matName, count);
-        agent.getActionQueue().add(gatherAction);
-        agent.getActionQueue().start();
+        return new MaterialRequest(matName, count);
     }
 
-    private Location findNearestBlockByMaterial(String matName) {
+    Location findNearestBlockByMaterial(String matName) {
         Location npcLoc = agent.getNpc().getLocation();
         World world = npcLoc.getWorld();
         int cx = npcLoc.getBlockX();
@@ -1213,7 +1229,8 @@ public class BehaviorController {
             for (int y = -4; y <= 4; y++) {
                 for (int z = -radius; z <= radius; z++) {
                     Block b = world.getBlockAt(cx + x, cy + y, cz + z);
-                    if (b.getType().name().contains(matName) || b.getType().name().equalsIgnoreCase(matName)) {
+                    // Token-boundary matching: "STONE" must not match REDSTONE_ORE.
+                    if (MaterialMatcher.matches(b.getType(), matName)) {
                         double distSq = b.getLocation().distanceSquared(npcLoc);
                         if (distSq < nearestDistSq) {
                             nearestDistSq = distSq;
@@ -1230,24 +1247,13 @@ public class BehaviorController {
     // --- Expedition management ---
 
     private void parseExpeditionAction(String arg) {
-        String[] parts = arg.trim().split("\\s+");
-        String material = parts[0];
-        int count = 16;
-        if (parts.length >= 2) {
-            try {
-                count = Integer.parseInt(parts[parts.length - 1]);
-                StringBuilder matBuilder = new StringBuilder();
-                for (int i = 0; i < parts.length - 1; i++) {
-                    if (matBuilder.length() > 0) matBuilder.append("_");
-                    matBuilder.append(parts[i]);
-                }
-                material = matBuilder.toString();
-            } catch (NumberFormatException e) {
-                material = String.join("_", parts);
-            }
-        }
+        MaterialRequest request = parseMaterialCount(arg);
+        String material = request.material();
+        int count = request.count();
 
-        Player owner = Bukkit.getPlayer(taskRequesterId != null ? taskRequesterId : null);
+        // Only look up the requester when one is set — Bukkit.getPlayer(null)
+        // throws. Otherwise fall through to the nearest-player fallback.
+        Player owner = taskRequesterId != null ? Bukkit.getPlayer(taskRequesterId) : null;
         if (owner == null) {
             // Find nearest player as fallback
             owner = findNearestPlayer();

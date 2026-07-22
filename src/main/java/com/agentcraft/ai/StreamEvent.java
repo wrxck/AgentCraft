@@ -32,10 +32,9 @@ public class StreamEvent {
     private final double costUsd;
     private final long durationMs;
     private final String sessionId;
-    private final JsonObject raw;
 
     private StreamEvent(Type type, String text, String toolName, String toolInput,
-                        double costUsd, long durationMs, String sessionId, JsonObject raw) {
+                        double costUsd, long durationMs, String sessionId) {
         this.type = type;
         this.text = text;
         this.toolName = toolName;
@@ -43,7 +42,6 @@ public class StreamEvent {
         this.costUsd = costUsd;
         this.durationMs = durationMs;
         this.sessionId = sessionId;
-        this.raw = raw;
     }
 
     public static StreamEvent parse(String line) {
@@ -56,12 +54,12 @@ public class StreamEvent {
             return switch (msgType) {
                 case "system" -> {
                     String sid = json.has("session_id") ? json.get("session_id").getAsString() : null;
-                    yield new StreamEvent(Type.INIT, null, null, null, 0, 0, sid, json);
+                    yield new StreamEvent(Type.INIT, null, null, null, 0, 0, sid);
                 }
                 case "assistant" -> parseAssistant(json);
-                case "user" -> new StreamEvent(Type.TOOL_RESULT, extractToolResultText(json), null, null, 0, 0, null, json);
+                case "user" -> new StreamEvent(Type.TOOL_RESULT, extractToolResultText(json), null, null, 0, 0, null);
                 case "result" -> parseResult(json);
-                default -> new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null, json);
+                default -> new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null);
             };
         } catch (Exception e) {
             return null;
@@ -70,33 +68,59 @@ public class StreamEvent {
 
     private static StreamEvent parseAssistant(JsonObject json) {
         if (!json.has("message")) {
-            return new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null, json);
+            return new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null);
         }
 
         JsonObject message = json.getAsJsonObject("message");
         if (!message.has("content")) {
-            return new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null, json);
+            return new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null);
         }
 
         JsonArray content = message.getAsJsonArray("content");
         if (content.isEmpty()) {
-            return new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null, json);
+            return new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null);
         }
 
-        // Process last content block
-        JsonObject block = content.get(content.size() - 1).getAsJsonObject();
-        String blockType = block.has("type") ? block.get("type").getAsString() : "";
+        // Scan all content blocks: a message may contain both text and tool_use.
+        StringBuilder textBuilder = new StringBuilder();
+        String toolName = null;
+        String toolInput = null;
 
-        if ("text".equals(blockType)) {
-            String text = block.has("text") ? block.get("text").getAsString() : "";
-            return new StreamEvent(Type.ASSISTANT_TEXT, text, null, null, 0, 0, null, json);
-        } else if ("tool_use".equals(blockType)) {
-            String name = block.has("name") ? block.get("name").getAsString() : "unknown";
-            String input = block.has("input") ? block.get("input").toString() : "";
-            return new StreamEvent(Type.TOOL_USE, null, name, input, 0, 0, null, json);
+        for (JsonElement el : content) {
+            if (!el.isJsonObject()) continue;
+            JsonObject block = el.getAsJsonObject();
+            String blockType = block.has("type") ? block.get("type").getAsString() : "";
+
+            if ("text".equals(blockType)) {
+                if (textBuilder.length() > 0) textBuilder.append('\n');
+                textBuilder.append(block.has("text") ? block.get("text").getAsString() : "");
+            } else if ("tool_use".equals(blockType) && toolName == null) {
+                toolName = block.has("name") ? block.get("name").getAsString() : "unknown";
+                toolInput = block.has("input") ? normalizeToolInput(block.get("input")) : "";
+            }
         }
 
-        return new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null, json);
+        String text = textBuilder.length() > 0 ? textBuilder.toString() : null;
+        if (toolName != null) {
+            // Tool use wins as the event type but any accompanying text is kept.
+            return new StreamEvent(Type.TOOL_USE, text, toolName, toolInput, 0, 0, null);
+        }
+        if (text != null) {
+            return new StreamEvent(Type.ASSISTANT_TEXT, text, null, null, 0, 0, null);
+        }
+        return new StreamEvent(Type.UNKNOWN, null, null, null, 0, 0, null);
+    }
+
+    /**
+     * Normalize a tool_use "input" element to raw JSON object text. Some
+     * producers emit it as a JSON object, others as a string primitive that
+     * contains the JSON; toString() on the latter would yield a quoted literal.
+     */
+    private static String normalizeToolInput(JsonElement input) {
+        if (input.isJsonPrimitive() && input.getAsJsonPrimitive().isString()) {
+            return input.getAsString();
+        }
+        return input.toString();
     }
 
     private static StreamEvent parseResult(JsonObject json) {
@@ -117,7 +141,7 @@ public class StreamEvent {
 
         String sid = json.has("session_id") ? json.get("session_id").getAsString() : null;
 
-        return new StreamEvent(Type.RESULT, resultText, null, null, cost, duration, sid, json);
+        return new StreamEvent(Type.RESULT, resultText, null, null, cost, duration, sid);
     }
 
     public String getSessionId() { return sessionId; }
@@ -144,5 +168,4 @@ public class StreamEvent {
     public String getToolInput() { return toolInput; }
     public double getCostUsd() { return costUsd; }
     public long getDurationMs() { return durationMs; }
-    public JsonObject getRaw() { return raw; }
 }

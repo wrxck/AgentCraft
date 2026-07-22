@@ -7,6 +7,7 @@ import com.comphenix.protocol.events.PacketContainer;
 import com.comphenix.protocol.wrappers.*;
 import com.comphenix.protocol.wrappers.BlockPosition;
 import com.comphenix.protocol.wrappers.Pair;
+import com.agentcraft.util.LocationUtil;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.EntityType;
@@ -19,9 +20,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class FakePlayer {
 
-    private static final AtomicInteger ENTITY_ID_COUNTER = new AtomicInteger(100000);
+    // Real servers hand out entity IDs from a counter that starts near zero and
+    // grows with every spawned entity; a long-running server can reach the
+    // millions. Start fake IDs at 1.9 billion so they can never collide with a
+    // real entity ID (which would mis-attribute interactions), while staying
+    // safely below Integer.MAX_VALUE.
+    private static final AtomicInteger ENTITY_ID_COUNTER = new AtomicInteger(1_900_000_000);
     private static final int SKIN_LAYERS_INDEX = 17;
     private static final byte SKIN_LAYERS_ALL = 0x7F;
+    private static final int POSE_INDEX = 6;
 
     private final int entityId;
     private final UUID uuid;
@@ -32,7 +39,6 @@ public class FakePlayer {
     private Location location;
     private SkinData skinData;
     private AgentEquipment equipment;
-    private boolean spawned;
 
     public FakePlayer(Plugin plugin, String name, Location location) {
         this.plugin = plugin;
@@ -42,7 +48,6 @@ public class FakePlayer {
         this.location = location.clone();
         this.skinData = SkinData.EMPTY;
         this.profile = new WrappedGameProfile(uuid, name);
-        this.spawned = false;
     }
 
     public void setSkinData(SkinData skinData) {
@@ -83,8 +88,6 @@ public class FakePlayer {
 
         // 6. Remove from tab after delay (skin needs ~2 seconds to load)
         Bukkit.getScheduler().runTaskLater(plugin, () -> sendPlayerInfoRemove(viewer, pm), 40L);
-
-        this.spawned = true;
     }
 
     public void sendEquipment(Player viewer) {
@@ -132,22 +135,25 @@ public class FakePlayer {
 
     /**
      * Set sleeping pose via entity metadata.
-     * Uses metadata index 6 (Pose enum): 0=STANDING, 2=SLEEPING
+     * Uses metadata index 6 (Pose enum): STANDING or SLEEPING.
      */
     public void setPose(Player viewer, boolean sleeping) {
         ProtocolManager pm = ProtocolLibrary.getProtocolManager();
 
         WrappedDataWatcher.Serializer byteSerializer = WrappedDataWatcher.Registry.get(Byte.class);
 
-        // Entity base metadata index 0: flags byte
-        // Bit 0x00 = normal (standing)
+        // Entity base metadata index 0: flags byte (0x00 = no special flags)
         byte flags = (byte) 0x00;
 
-        // Pose is index 6, using EntityPose enum
-        // We use the byte serializer for the flags and handle pose separately
         List<WrappedDataValue> values = new ArrayList<>();
         values.add(new WrappedDataValue(0, byteSerializer, flags));
         values.add(new WrappedDataValue(SKIN_LAYERS_INDEX, byteSerializer, SKIN_LAYERS_ALL));
+        // Pose (metadata index 6): without this the sleeping pose never shows.
+        EnumWrappers.EntityPose pose = sleeping
+                ? EnumWrappers.EntityPose.SLEEPING
+                : EnumWrappers.EntityPose.STANDING;
+        values.add(new WrappedDataValue(POSE_INDEX,
+                WrappedDataWatcher.Registry.get(EnumWrappers.EntityPose.class), pose));
 
         PacketContainer packet = new PacketContainer(PacketType.Play.Server.ENTITY_METADATA);
         packet.getIntegers().write(0, entityId);
@@ -163,7 +169,6 @@ public class FakePlayer {
 
         // Also remove from tab in case still listed
         sendPlayerInfoRemove(viewer, pm);
-        this.spawned = false;
     }
 
     public void move(Player viewer, double dx, double dy, double dz, float yaw, float pitch) {
@@ -224,13 +229,9 @@ public class FakePlayer {
     }
 
     public void lookAt(Player viewer, Location target) {
-        double dx = target.getX() - location.getX();
-        double dy = target.getY() - location.getY();
-        double dz = target.getZ() - location.getZ();
-        double dist = Math.sqrt(dx * dx + dz * dz);
-
-        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-        float pitch = (float) -Math.toDegrees(Math.atan2(dy, dist));
+        float[] yawPitch = LocationUtil.calculateYawPitch(location, target);
+        float yaw = yawPitch[0];
+        float pitch = yawPitch[1];
 
         ProtocolManager pm = ProtocolLibrary.getProtocolManager();
 
@@ -328,9 +329,12 @@ public class FakePlayer {
                 .write(0, location.getX())
                 .write(1, location.getY())
                 .write(2, location.getZ());
+        // Modern SPAWN_ENTITY byte order: index 0 = pitch (xRot), index 1 = yaw
+        // (yRot), index 2 = head yaw. Writing yaw first would spawn the NPC
+        // facing the wrong direction until the first look packet.
         packet.getBytes()
-                .write(0, toAngle(location.getYaw()))
-                .write(1, toAngle(location.getPitch()))
+                .write(0, toAngle(location.getPitch()))
+                .write(1, toAngle(location.getYaw()))
                 .write(2, toAngle(location.getYaw())); // head yaw
         pm.sendServerPacket(viewer, packet);
     }
@@ -365,7 +369,6 @@ public class FakePlayer {
     public UUID getUuid() { return uuid; }
     public String getName() { return name; }
     public Location getLocation() { return location.clone(); }
-    public boolean isSpawned() { return spawned; }
 
     public void setLocation(Location location) {
         this.location = location.clone();

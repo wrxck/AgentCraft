@@ -1,12 +1,10 @@
 package com.agentcraft.ai;
 
-import com.agentcraft.action.ChatAction;
-import com.agentcraft.action.EmoteAction;
-import com.agentcraft.action.EmoteAction.EmoteType;
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.agent.AgentState;
 import com.agentcraft.util.MessageUtil;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.entity.Player;
 
 /**
@@ -110,8 +108,14 @@ public class StreamProcessor {
 
     private void broadcastChat(String text) {
         String formatted = MessageUtil.agentChat(agent.getNpc().getName(), text);
+        Location npcLoc = agent.getNpc().getLocation();
         for (Player p : Bukkit.getOnlinePlayers()) {
-            if (p.getLocation().distanceSquared(agent.getNpc().getLocation()) <= 50 * 50) {
+            Location playerLoc = p.getLocation();
+            // distanceSquared throws for locations in different worlds
+            if (npcLoc.getWorld() == null || !npcLoc.getWorld().equals(playerLoc.getWorld())) {
+                continue;
+            }
+            if (playerLoc.distanceSquared(npcLoc) <= 50 * 50) {
                 p.sendMessage(formatted);
             }
         }
@@ -125,6 +129,4 @@ public class StreamProcessor {
         seconds = seconds % 60;
         return minutes + "m " + seconds + "s";
     }
-
-    public int getToolUseCount() { return toolUseCount; }
 }

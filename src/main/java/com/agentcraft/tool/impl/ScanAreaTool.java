@@ -2,6 +2,7 @@ package com.agentcraft.tool.impl;
 
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.tool.MinecraftTool;
+import com.agentcraft.tool.ToolArgs;
 import com.agentcraft.tool.ToolResult;
 import com.google.gson.JsonObject;
 import org.bukkit.Location;
@@ -30,11 +31,19 @@ public class ScanAreaTool implements MinecraftTool {
     }
 
     @Override public ToolResult execute(AIAgent agent, JsonObject params) {
-        String target = params.has("target") ? params.get("target").getAsString() : null;
+        try {
+            return run(agent, params);
+        } catch (ToolArgs.BadArgument e) {
+            return ToolResult.fail(e.getMessage());
+        }
+    }
+
+    private ToolResult run(AIAgent agent, JsonObject params) {
+        String target = ToolArgs.optString(params, "target");
         if (target == null || target.isEmpty()) return ToolResult.fail("No scan target specified");
 
-        int radius = params.has("radius") ? params.get("radius").getAsInt() : 16;
-        radius = Math.min(radius, 32);
+        int radius = ToolArgs.optInt(params, "radius", 16);
+        radius = Math.max(1, Math.min(radius, 32));
 
         Location npcLoc = agent.getNpc().getLocation();
 

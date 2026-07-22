@@ -1,5 +1,6 @@
 package com.agentcraft.memory;
 
+import com.agentcraft.util.EnvFileParser;
 import org.bukkit.plugin.Plugin;
 
 import java.io.BufferedReader;
@@ -24,7 +25,9 @@ public class MemoryManager {
     private final Logger logger;
     private QdrantClient qdrant;
     private EmbeddingClient embeddings;
-    private boolean available;
+    // Written from the async init thread (CompletableFuture.runAsync) and read
+    // from the main server thread; volatile guarantees the write is visible.
+    private volatile boolean available;
 
     public MemoryManager(Plugin plugin) {
         this.plugin = plugin;
@@ -137,24 +140,17 @@ public class MemoryManager {
     }
 
     private Map<String, String> loadSecrets() {
-        Map<String, String> secrets = new HashMap<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(SECRETS_PATH))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) continue;
-                int eq = line.indexOf('=');
-                if (eq > 0) {
-                    secrets.put(line.substring(0, eq), line.substring(eq + 1));
-                }
-            }
+            // Shared parser (trim, comments, quote-stripping) so the same
+            // secrets file parses identically here and in PersistenceManager.
+            return EnvFileParser.parse(reader);
         } catch (Exception e) {
             logger.info("[Memory] No fleet secrets found at " + SECRETS_PATH + " — using config defaults");
+            return new HashMap<>();
         }
-        return secrets;
     }
 
-    private static String formatTimeAgo(long timestamp) {
+    static String formatTimeAgo(long timestamp) {
         long diff = System.currentTimeMillis() - timestamp;
         long minutes = diff / 60_000;
         if (minutes < 1) return "just now";
@@ -165,11 +161,11 @@ public class MemoryManager {
         return days + "d ago";
     }
 
-    private static String firstNonNull(String a, String b) {
+    static String firstNonNull(String a, String b) {
         return (a != null && !a.isEmpty()) ? a : b;
     }
 
-    private static int parseInt(String value, int defaultValue) {
+    static int parseInt(String value, int defaultValue) {
         if (value == null || value.isEmpty()) return defaultValue;
         try { return Integer.parseInt(value); } catch (NumberFormatException e) { return defaultValue; }
     }

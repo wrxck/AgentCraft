@@ -423,6 +423,10 @@ public class AgentCommand implements CommandExecutor, TabCompleter {
                 MessageUtil.send(player, MessageUtil.error("Invalid count: " + args[3]));
                 return;
             }
+            if (count < 1 || count > 64) {
+                MessageUtil.send(player, MessageUtil.error("Count must be between 1 and 64."));
+                return;
+            }
         }
 
         ExpeditionController expedition = new ExpeditionController(agent, player, material, count);

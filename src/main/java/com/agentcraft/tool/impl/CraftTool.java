@@ -2,11 +2,13 @@ package com.agentcraft.tool.impl;
 
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.tool.MinecraftTool;
+import com.agentcraft.tool.ToolArgs;
 import com.agentcraft.tool.ToolResult;
 import com.google.gson.JsonObject;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -127,10 +129,19 @@ public class CraftTool implements MinecraftTool {
     }
 
     @Override public ToolResult execute(AIAgent agent, JsonObject params) {
-        String itemName = params.has("item") ? params.get("item").getAsString().toLowerCase().replace(' ', '_') : null;
+        try {
+            return run(agent, params);
+        } catch (ToolArgs.BadArgument e) {
+            return ToolResult.fail(e.getMessage());
+        }
+    }
+
+    private ToolResult run(AIAgent agent, JsonObject params) {
+        String rawItem = ToolArgs.optString(params, "item");
+        String itemName = rawItem != null ? rawItem.toLowerCase().replace(' ', '_') : null;
         if (itemName == null || itemName.isEmpty()) return ToolResult.fail("No item specified");
 
-        int batches = params.has("count") ? params.get("count").getAsInt() : 1;
+        int batches = ToolArgs.optInt(params, "count", 1);
         batches = Math.max(1, Math.min(batches, 64));
 
         Recipe recipe = RECIPES.get(itemName);
@@ -175,14 +186,15 @@ public class CraftTool implements MinecraftTool {
     private void consumeIngredients(AIAgent agent, Recipe recipe) {
         for (Ingredient ing : recipe.ingredients) {
             int remaining = ing.count;
-            for (ItemStack stack : agent.getBehaviorController().getInventory()) {
+            // Iterate a snapshot copy: removeFromInventory structurally mutates
+            // the live list backing getInventory(), which would otherwise abort
+            // or corrupt iteration (CME / partially-consumed ingredients).
+            for (ItemStack stack : new ArrayList<>(agent.getBehaviorController().getInventory())) {
                 if (remaining <= 0) break;
                 if (matchesMaterial(stack.getType(), ing.pattern)) {
                     int remove = Math.min(remaining, stack.getAmount());
-                    for (int i = 0; i < remove; i++) {
-                        agent.getBehaviorController().removeFromInventory(stack.getType());
-                    }
-                    remaining -= remove;
+                    int removed = agent.getBehaviorController().removeFromInventory(stack.getType(), remove);
+                    remaining -= removed;
                 }
             }
         }
@@ -198,12 +210,19 @@ public class CraftTool implements MinecraftTool {
         return total;
     }
 
+    /**
+     * Recipe patterns are either an exact material name (e.g. "WHEAT", "DIAMOND")
+     * or a suffix category starting with "_" (e.g. "_PLANKS" matches any planks).
+     * Free substring matching is deliberately NOT used: it made "WHEAT" consume
+     * WHEAT_SEEDS, "DIAMOND" consume DIAMOND_PICKAXE, "STONE" consume
+     * COBBLESTONE/REDSTONE, etc.
+     */
     private boolean matchesMaterial(Material mat, String pattern) {
         String name = mat.name();
         if (pattern.startsWith("_")) {
             return name.endsWith(pattern);
         }
-        return name.equalsIgnoreCase(pattern) || name.contains(pattern);
+        return name.equalsIgnoreCase(pattern);
     }
 
     private static Ingredient mat(String pattern, int count) {

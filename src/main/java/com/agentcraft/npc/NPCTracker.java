@@ -60,13 +60,21 @@ public class NPCTracker {
 
     public void showNPCsInChunk(Player player, Chunk chunk) {
         for (FakePlayer npc : new ArrayList<>(byEntityId.values())) {
-            Location loc = npc.getLocation();
-            if (loc.getWorld().equals(chunk.getWorld())
-                    && loc.getBlockX() >> 4 == chunk.getX()
-                    && loc.getBlockZ() >> 4 == chunk.getZ()) {
+            if (isInChunk(npc.getLocation(), chunk)) {
                 npc.spawn(player);
             }
         }
+    }
+
+    /**
+     * True if the location lies inside the given chunk (same world and chunk
+     * coordinates). Shared helper for the "NPC in chunk" test; ChunkListener
+     * duplicates this logic and can delegate here as well.
+     */
+    public static boolean isInChunk(Location loc, Chunk chunk) {
+        return loc.getWorld().equals(chunk.getWorld())
+                && loc.getBlockX() >> 4 == chunk.getX()
+                && loc.getBlockZ() >> 4 == chunk.getZ();
     }
 
     public void despawnAll() {

@@ -2,6 +2,7 @@ package com.agentcraft.tool.impl;
 
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.tool.MinecraftTool;
+import com.agentcraft.tool.ToolArgs;
 import com.agentcraft.tool.ToolResult;
 import com.google.gson.JsonObject;
 import org.bukkit.Location;
@@ -15,9 +16,7 @@ import org.bukkit.block.data.Powerable;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 public class InteractBlockTool implements MinecraftTool {
@@ -40,14 +39,20 @@ public class InteractBlockTool implements MinecraftTool {
     }
 
     @Override public ToolResult execute(AIAgent agent, JsonObject params) {
-        if (!params.has("x") || !params.has("y") || !params.has("z")) {
-            return ToolResult.fail("Must provide x, y, z coordinates");
+        try {
+            return run(agent, params);
+        } catch (ToolArgs.BadArgument e) {
+            return ToolResult.fail(e.getMessage());
         }
+    }
 
-        int x = params.get("x").getAsInt();
-        int y = params.get("y").getAsInt();
-        int z = params.get("z").getAsInt();
-        String action = params.has("action") ? params.get("action").getAsString() : "read";
+    private ToolResult run(AIAgent agent, JsonObject params) {
+        int[] coords = ToolArgs.coords(params);
+        int x = coords[0];
+        int y = coords[1];
+        int z = coords[2];
+        String action = ToolArgs.optString(params, "action");
+        if (action == null || action.isEmpty()) action = "read";
 
         Location npcLoc = agent.getNpc().getLocation();
         double dist = Math.sqrt(Math.pow(x - npcLoc.getX(), 2)
@@ -88,15 +93,17 @@ public class InteractBlockTool implements MinecraftTool {
             }
             case "take" -> {
                 if (state instanceof Chest chest) {
-                    return takeFromChest(agent, chest);
+                    FilterAndCount fc = parseFilterAndCount(params);
+                    if (fc.error != null) return fc.error;
+                    return takeFromChest(agent, chest, fc.filter, fc.maxCount, fc.filterName);
                 }
                 return ToolResult.fail("Not a container");
             }
             case "deposit" -> {
                 if (state instanceof Chest chest) {
-                    String itemFilter = params.has("item") ? params.get("item").getAsString() : null;
-                    int count = params.has("count") ? params.get("count").getAsInt() : Integer.MAX_VALUE;
-                    return depositIntoChest(agent, chest, itemFilter, count);
+                    FilterAndCount fc = parseFilterAndCount(params);
+                    if (fc.error != null) return fc.error;
+                    return depositIntoChest(agent, chest, fc.filter, fc.maxCount, fc.filterName);
                 }
                 return ToolResult.fail("Not a container");
             }
@@ -104,6 +111,31 @@ public class InteractBlockTool implements MinecraftTool {
                 return ToolResult.fail("Unknown action: " + action + ". Use 'read', 'toggle', 'take', or 'deposit'.");
             }
         }
+    }
+
+    private static final class FilterAndCount {
+        Material filter;
+        String filterName;
+        int maxCount;
+        ToolResult error;
+    }
+
+    private FilterAndCount parseFilterAndCount(JsonObject params) {
+        FilterAndCount fc = new FilterAndCount();
+        fc.filterName = ToolArgs.optString(params, "item");
+        if (fc.filterName != null && !fc.filterName.isEmpty()) {
+            try {
+                fc.filter = Material.valueOf(fc.filterName.toUpperCase().replace(' ', '_'));
+            } catch (IllegalArgumentException e) {
+                fc.error = ToolResult.fail("Unknown material: " + fc.filterName);
+                return fc;
+            }
+        }
+        fc.maxCount = ToolArgs.optInt(params, "count", Integer.MAX_VALUE);
+        if (fc.maxCount <= 0) {
+            fc.error = ToolResult.fail("Count must be positive");
+        }
+        return fc;
     }
 
     private ToolResult readChest(Chest chest) {
@@ -127,73 +159,60 @@ public class InteractBlockTool implements MinecraftTool {
         return ToolResult.ok(sb.toString());
     }
 
-    private ToolResult takeFromChest(AIAgent agent, Chest chest) {
+    private ToolResult takeFromChest(AIAgent agent, Chest chest, Material filter, int maxCount,
+                                     String filterName) {
         Inventory inv = chest.getInventory();
         int taken = 0;
 
         for (int i = 0; i < inv.getSize(); i++) {
             ItemStack stack = inv.getItem(i);
-            if (stack != null && stack.getType() != Material.AIR) {
-                agent.getBehaviorController().addToInventory(stack.clone());
+            if (stack == null || stack.getType() == Material.AIR) continue;
+            if (filter != null && stack.getType() != filter) continue;
+            int toTake = Math.min(stack.getAmount(), maxCount - taken);
+            if (toTake <= 0) break;
+
+            ItemStack takenStack = stack.clone();
+            takenStack.setAmount(toTake);
+            agent.getBehaviorController().addToInventory(takenStack);
+
+            if (toTake >= stack.getAmount()) {
                 inv.setItem(i, null);
-                taken += stack.getAmount();
+            } else {
+                ItemStack remainder = stack.clone();
+                remainder.setAmount(stack.getAmount() - toTake);
+                inv.setItem(i, remainder);
             }
+            taken += toTake;
         }
 
-        if (taken == 0) return ToolResult.ok("Chest was empty");
+        if (taken == 0) {
+            if (filter != null) {
+                return ToolResult.fail("No " + filterName + " in that chest");
+            }
+            return ToolResult.ok("Chest was empty");
+        }
         return ToolResult.ok("Took " + taken + " items from chest");
     }
 
-    private ToolResult depositIntoChest(AIAgent agent, Chest chest, String itemFilter, int maxCount) {
-        Inventory chestInv = chest.getInventory();
-        Material filterMat = null;
-        if (itemFilter != null && !itemFilter.isEmpty()) {
-            try {
-                filterMat = Material.valueOf(itemFilter.toUpperCase().replace(' ', '_'));
-            } catch (IllegalArgumentException e) {
-                return ToolResult.fail("Unknown material: " + itemFilter);
-            }
-        }
-
+    private ToolResult depositIntoChest(AIAgent agent, Chest chest, Material filter, int maxCount,
+                                        String filterName) {
         var npcInventory = agent.getBehaviorController().getInventory();
         if (npcInventory.isEmpty()) {
             return ToolResult.fail("Your inventory is empty");
         }
 
-        // Collect items to deposit from NPC inventory
-        int deposited = 0;
-        List<ItemStack> toDeposit = new ArrayList<>();
-        for (ItemStack stack : npcInventory) {
-            if (filterMat != null && stack.getType() != filterMat) continue;
-            int take = Math.min(stack.getAmount(), maxCount - deposited);
-            if (take <= 0) break;
-            toDeposit.add(new ItemStack(stack.getType(), take));
-            deposited += take;
+        boolean hasMatching = filter == null
+                || npcInventory.stream().anyMatch(s -> s.getType() == filter);
+        if (!hasMatching) {
+            return ToolResult.fail("No " + filterName + " in inventory");
         }
+
+        int deposited = ChestTransfer.deposit(agent, chest.getInventory(), filter, maxCount);
 
         if (deposited == 0) {
-            return ToolResult.fail(filterMat != null
-                    ? "No " + itemFilter + " in inventory"
-                    : "Nothing to deposit");
-        }
-
-        // Try to add items to chest
-        int actualDeposited = 0;
-        for (ItemStack stack : toDeposit) {
-            Map<Integer, ItemStack> overflow = chestInv.addItem(stack);
-            int notFit = overflow.values().stream().mapToInt(ItemStack::getAmount).sum();
-            int fit = stack.getAmount() - notFit;
-            if (fit > 0) {
-                agent.getBehaviorController().removeFromInventory(stack.getType(), fit);
-                actualDeposited += fit;
-            }
-            if (notFit > 0) break; // chest is full
-        }
-
-        if (actualDeposited == 0) {
             return ToolResult.fail("Chest is full");
         }
 
-        return ToolResult.ok("Deposited " + actualDeposited + " items into chest");
+        return ToolResult.ok("Deposited " + deposited + " items into chest");
     }
 }
