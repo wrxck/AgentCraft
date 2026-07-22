@@ -343,9 +343,15 @@ public class AgentManager {
             chunkForceManager.releaseAll(name);
         }
 
-        // Release name and skin back to pools
+        // Release name back to the pool. Only release the skin when no other
+        // live agent still wears it (the pool-exhausted fallback allows reuse).
         usedNames.remove(name.toLowerCase());
-        usedSkins.remove(agent.getProfile().getSkin().toLowerCase());
+        String skin = agent.getProfile().getSkin();
+        boolean skinStillWorn = skin != null && agents.values().stream()
+                .anyMatch(a -> skin.equalsIgnoreCase(a.getProfile().getSkin()));
+        if (skin != null && !skinStillWorn) {
+            usedSkins.remove(skin.toLowerCase());
+        }
 
         agent.getBehaviorController().stop();
         agent.stop();
@@ -360,9 +366,10 @@ public class AgentManager {
             plugin.getConversationManager().clearSession(npc.getName());
         }
 
-        // Remove from database
+        // Remove from database. Rows are keyed by the NPC's canonical name;
+        // the user-typed name may differ in case and would delete nothing.
         if (persistence != null && persistence.isAvailable()) {
-            persistence.deleteAgent(name);
+            persistence.deleteAgent(npc.getName());
         }
 
         return true;

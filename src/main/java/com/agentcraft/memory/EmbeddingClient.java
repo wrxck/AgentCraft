@@ -54,8 +54,11 @@ public class EmbeddingClient {
                         return null;
                     }
                     JsonObject result = gson.fromJson(response.body(), JsonObject.class);
-                    JsonArray embeddings = result.getAsJsonArray("embeddings");
-                    if (embeddings.isEmpty()) return null;
+                    JsonArray embeddings = result != null ? result.getAsJsonArray("embeddings") : null;
+                    if (embeddings == null || embeddings.isEmpty()) {
+                        logger.warning("[Memory] Embedding response missing 'embeddings' array");
+                        return null;
+                    }
 
                     JsonArray vec = embeddings.get(0).getAsJsonArray();
                     float[] vector = new float[vec.size()];

@@ -2,8 +2,11 @@ package com.agentcraft.tool.impl;
 
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.tool.MinecraftTool;
+import com.agentcraft.tool.ToolArgs;
 import com.agentcraft.tool.ToolResult;
 import com.google.gson.JsonObject;
+import java.util.ArrayList;
+import java.util.List;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -27,7 +30,15 @@ public class GiveItemTool implements MinecraftTool {
     }
 
     @Override public ToolResult execute(AIAgent agent, JsonObject params) {
-        String playerName = params.has("player") ? params.get("player").getAsString() : null;
+        try {
+            return run(agent, params);
+        } catch (ToolArgs.BadArgument e) {
+            return ToolResult.fail(e.getMessage());
+        }
+    }
+
+    private ToolResult run(AIAgent agent, JsonObject params) {
+        String playerName = ToolArgs.optString(params, "player");
         if (playerName == null || playerName.isEmpty()) return ToolResult.fail("No player specified");
 
         Player target = Bukkit.getPlayerExact(playerName);
@@ -37,39 +48,39 @@ public class GiveItemTool implements MinecraftTool {
             return ToolResult.fail("Player is in a different world");
         }
 
-        String matName = params.has("material") ? params.get("material").getAsString() : null;
-        int maxCount = params.has("count") ? params.get("count").getAsInt() : Integer.MAX_VALUE;
+        String matName = ToolArgs.optString(params, "material");
+        int maxCount = ToolArgs.optInt(params, "count", Integer.MAX_VALUE);
+        if (maxCount <= 0) {
+            return ToolResult.fail("Count must be positive");
+        }
         Location dropLoc = target.getLocation();
 
-        int dropped = 0;
-
-        if (matName == null || matName.isEmpty()) {
-            // Give everything
-            for (ItemStack stack : agent.getBehaviorController().getInventory()) {
-                if (dropped >= maxCount) break;
-                dropLoc.getWorld().dropItem(dropLoc, stack.clone());
-                dropped += stack.getAmount();
-            }
-            // Clear inventory
-            while (!agent.getBehaviorController().getInventory().isEmpty()) {
-                ItemStack first = agent.getBehaviorController().getInventory().get(0);
-                agent.getBehaviorController().removeFromInventory(first.getType());
-            }
-        } else {
-            // Give specific material
-            String upperMat = matName.toUpperCase().replace(' ', '_');
-            Material material;
+        Material filter = null;
+        if (matName != null && !matName.isEmpty()) {
             try {
-                material = Material.valueOf(upperMat);
+                filter = Material.valueOf(matName.toUpperCase().replace(' ', '_'));
             } catch (IllegalArgumentException e) {
                 return ToolResult.fail("Unknown material: " + matName);
             }
+        }
 
-            while (dropped < maxCount && agent.getBehaviorController().hasInInventory(material)) {
-                agent.getBehaviorController().removeFromInventory(material);
-                dropLoc.getWorld().dropItem(dropLoc, new ItemStack(material));
-                dropped++;
-            }
+        // Iterate a snapshot copy: removeFromInventory structurally mutates the
+        // live list backing getInventory(). Remove exactly what was dropped —
+        // never wipe stacks that were not given away. Cloning the original stack
+        // (not new ItemStack(...)) preserves enchantments/meta.
+        int dropped = 0;
+        List<ItemStack> snapshot = new ArrayList<>(agent.getBehaviorController().getInventory());
+        for (ItemStack stack : snapshot) {
+            if (filter != null && stack.getType() != filter) continue;
+            int remaining = maxCount - dropped;
+            if (remaining <= 0) break;
+            int toDrop = Math.min(stack.getAmount(), remaining);
+
+            ItemStack dropStack = stack.clone();
+            dropStack.setAmount(toDrop);
+            dropLoc.getWorld().dropItem(dropLoc, dropStack);
+            agent.getBehaviorController().removeFromInventory(stack.getType(), toDrop);
+            dropped += toDrop;
         }
 
         if (dropped == 0) return ToolResult.fail("No matching items in inventory");

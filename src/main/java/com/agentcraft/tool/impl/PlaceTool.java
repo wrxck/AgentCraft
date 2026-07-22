@@ -2,6 +2,7 @@ package com.agentcraft.tool.impl;
 
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.tool.MinecraftTool;
+import com.agentcraft.tool.ToolArgs;
 import com.agentcraft.tool.ToolResult;
 import com.google.gson.JsonObject;
 
@@ -23,14 +24,21 @@ public class PlaceTool implements MinecraftTool {
     }
 
     @Override public ToolResult execute(AIAgent agent, JsonObject params) {
-        String material = params.has("material") ? params.get("material").getAsString() : null;
-        if (material == null) return ToolResult.fail("No material specified");
-        if (!params.has("x") || !params.has("y") || !params.has("z"))
-            return ToolResult.fail("Coordinates x, y, z required");
+        try {
+            return run(agent, params);
+        } catch (ToolArgs.BadArgument e) {
+            return ToolResult.fail(e.getMessage());
+        }
+    }
 
-        int x = params.get("x").getAsInt();
-        int y = params.get("y").getAsInt();
-        int z = params.get("z").getAsInt();
+    private ToolResult run(AIAgent agent, JsonObject params) {
+        String material = ToolArgs.optString(params, "material");
+        if (material == null || material.isEmpty()) return ToolResult.fail("No material specified");
+
+        int[] coords = ToolArgs.coords(params);
+        int x = coords[0];
+        int y = coords[1];
+        int z = coords[2];
 
         agent.getBehaviorController().executeAction("place " + material + " " + x + " " + y + " " + z);
         return ToolResult.ok("Placing " + material + " at " + x + " " + y + " " + z);

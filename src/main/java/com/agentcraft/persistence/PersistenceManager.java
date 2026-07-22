@@ -1,5 +1,6 @@
 package com.agentcraft.persistence;
 
+import com.agentcraft.util.EnvFileParser;
 import org.bukkit.plugin.Plugin;
 
 import java.io.BufferedReader;
@@ -69,21 +70,9 @@ public class PersistenceManager {
 
         Properties props = new Properties();
         try (BufferedReader reader = new BufferedReader(new FileReader(secretsFile))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) continue;
-                int eq = line.indexOf('=');
-                if (eq > 0) {
-                    String key = line.substring(0, eq).trim();
-                    String value = line.substring(eq + 1).trim();
-                    // Strip quotes
-                    if (value.startsWith("\"") && value.endsWith("\"")) {
-                        value = value.substring(1, value.length() - 1);
-                    }
-                    props.setProperty(key, value);
-                }
-            }
+            // Shared parser (trim, comments, quote-stripping) so the same
+            // secrets file parses identically here and in MemoryManager.
+            EnvFileParser.parse(reader).forEach(props::setProperty);
         } catch (Exception e) {
             plugin.getLogger().warning("[Persistence] Could not read fleet secrets: " + e.getMessage());
             return null;
@@ -91,11 +80,18 @@ public class PersistenceManager {
         return props;
     }
 
-    private Connection getConnection() throws SQLException {
-        if (connection == null || connection.isClosed()) {
-            connection = DriverManager.getConnection(jdbcUrl, dbProps);
+    Connection getConnection() throws SQLException {
+        // isClosed() is a fast-path only: a dead TCP connection is never
+        // "closed", so also probe with isValid() to trigger a reconnect.
+        if (connection == null || connection.isClosed() || !connection.isValid(2)) {
+            connection = openConnection();
         }
         return connection;
+    }
+
+    /** Seam for tests: opens a fresh JDBC connection. */
+    Connection openConnection() throws SQLException {
+        return DriverManager.getConnection(jdbcUrl, dbProps);
     }
 
     private void createTables() throws SQLException {
@@ -206,8 +202,20 @@ public class PersistenceManager {
     // --- Inventory ---
 
     public void saveInventory(String agentName, List<InventoryItem> items) {
+        // DELETE + INSERT must be atomic: a failure between them in autocommit
+        // mode would permanently wipe the agent's saved inventory.
+        Connection conn;
         try {
-            Connection conn = getConnection();
+            conn = getConnection();
+        } catch (SQLException e) {
+            plugin.getLogger().warning("[Persistence] Failed to save inventory for " + agentName + ": " + e.getMessage());
+            return;
+        }
+
+        boolean previousAutoCommit = true;
+        try {
+            previousAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
 
             // Clear existing inventory
             try (PreparedStatement ps = conn.prepareStatement("DELETE FROM agent_inventory WHERE agent_name = ?")) {
@@ -215,21 +223,36 @@ public class PersistenceManager {
                 ps.executeUpdate();
             }
 
-            if (items.isEmpty()) return;
-
-            // Batch insert
-            String sql = "INSERT INTO agent_inventory (agent_name, material, amount) VALUES (?, ?, ?)";
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                for (InventoryItem item : items) {
-                    ps.setString(1, agentName);
-                    ps.setString(2, item.material());
-                    ps.setInt(3, item.amount());
-                    ps.addBatch();
+            if (!items.isEmpty()) {
+                // Batch insert
+                String sql = "INSERT INTO agent_inventory (agent_name, material, amount) VALUES (?, ?, ?)";
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    for (InventoryItem item : items) {
+                        ps.setString(1, agentName);
+                        ps.setString(2, item.material());
+                        ps.setInt(3, item.amount());
+                        ps.addBatch();
+                    }
+                    ps.executeBatch();
                 }
-                ps.executeBatch();
             }
+
+            conn.commit();
         } catch (SQLException e) {
+            try {
+                conn.rollback();
+            } catch (SQLException rollbackError) {
+                plugin.getLogger().warning("[Persistence] Rollback failed for " + agentName + ": "
+                        + rollbackError.getMessage());
+            }
             plugin.getLogger().warning("[Persistence] Failed to save inventory for " + agentName + ": " + e.getMessage());
+        } finally {
+            try {
+                conn.setAutoCommit(previousAutoCommit);
+            } catch (SQLException restoreError) {
+                plugin.getLogger().warning("[Persistence] Could not restore autocommit: "
+                        + restoreError.getMessage());
+            }
         }
     }
 

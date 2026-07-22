@@ -166,7 +166,7 @@ public class QdrantClient {
                 });
     }
 
-    private List<MemoryEntry> parseSearchResults(String responseBody) {
+    List<MemoryEntry> parseSearchResults(String responseBody) {
         List<MemoryEntry> results = new ArrayList<>();
         try {
             JsonObject json = gson.fromJson(responseBody, JsonObject.class);

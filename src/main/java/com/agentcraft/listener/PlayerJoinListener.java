@@ -17,10 +17,15 @@ public class PlayerJoinListener implements Listener {
 
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
-        // Delay slightly to ensure client is ready
+        // Delay slightly to ensure client is ready. Guard against players who
+        // disconnect again before the delayed task runs.
         org.bukkit.Bukkit.getScheduler().runTaskLater(
                 plugin,
-                () -> tracker.showToPlayer(event.getPlayer()),
+                () -> {
+                    if (event.getPlayer().isOnline()) {
+                        tracker.showToPlayer(event.getPlayer());
+                    }
+                },
                 20L
         );
     }
