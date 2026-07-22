@@ -254,24 +254,27 @@ public class NavigationController {
     }
 
     private void arrive() {
-        state = State.ARRIVED;
         path = null;
         pathfinder = null;
         Runnable cb = onArrival;
         onArrival = null;
         onFailed = null;
-        if (cb != null) cb.run();
+        // Go IDLE *before* invoking the callback: a callback may start a new
+        // navigation (chained navigateTo), and setting IDLE afterwards would
+        // silently clobber it.
         state = State.IDLE;
+        if (cb != null) cb.run();
     }
 
     private void fail() {
-        state = State.FAILED;
         path = null;
         pathfinder = null;
         Runnable cb = onFailed;
         onArrival = null;
         onFailed = null;
-        if (cb != null) cb.run();
+        // See arrive(): IDLE must be set before the callback runs so a
+        // navigation started inside the callback is not clobbered.
         state = State.IDLE;
+        if (cb != null) cb.run();
     }
 }

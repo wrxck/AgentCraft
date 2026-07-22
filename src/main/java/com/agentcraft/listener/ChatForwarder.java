@@ -3,6 +3,7 @@ package com.agentcraft.listener;
 import com.agentcraft.agent.AIAgent;
 import com.agentcraft.agent.AgentManager;
 import com.agentcraft.ai.ConversationManager;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -34,29 +35,29 @@ public class ChatForwarder implements Listener {
 
         String message = event.getMessage();
 
-        // Check if this message triggers a coding task for any NPC
-        // If so, skip forwarding — let ChatListener handle it
-        if (isCodeTask(message)) return;
+        // Skip forwarding only when ChatListener will actually dispatch this
+        // message as a coding task. The guards here mirror ChatListener's
+        // exactly (shared parser + same permission/world/range checks): a
+        // mention the task path will NOT act on (e.g. out of range) must still
+        // reach the conversation path instead of being silently dropped.
+        if (isActionableCodeTask(event.getPlayer(), message)) return;
 
         // Forward to ConversationManager (thread-safe, schedules to main thread internally)
         conversationManager.onChatMessage(playerName, message);
     }
 
-    private boolean isCodeTask(String message) {
-        String lowerMsg = message.toLowerCase();
+    private boolean isActionableCodeTask(Player player, String message) {
+        if (!player.hasPermission("agentcraft.use")) return false;
+
         for (AIAgent agent : AgentManager.getInstance().getAllAgents()) {
-            String agentName = agent.getNpc().getName().toLowerCase();
-            if (lowerMsg.contains(agentName)) {
-                // Check if there's task text after the agent name
-                int nameIdx = lowerMsg.indexOf(agentName);
-                String afterName = message.substring(nameIdx + agentName.length()).trim();
-                // Strip leading punctuation
-                if (!afterName.isEmpty() && (afterName.charAt(0) == ',' || afterName.charAt(0) == ':')) {
-                    afterName = afterName.substring(1).trim();
-                }
-                if (!afterName.isEmpty()) {
-                    return true;
-                }
+            String agentName = agent.getNpc().getName();
+            for (AgentMentionParser.Mention mention
+                    : AgentMentionParser.parseAll(message, List.of(agentName))) {
+                if (mention.task().isEmpty()) continue;
+                if (!agent.getNpc().getLocation().getWorld().equals(player.getWorld())) continue;
+                double radius = agent.getPlugin().getConfig().getDouble("chat-radius", 15);
+                if (agent.getNpc().getLocation().distanceSquared(player.getLocation()) > radius * radius) continue;
+                return true;
             }
         }
         return false;

@@ -44,11 +44,6 @@ public class LocationUtil {
         return Math.sqrt(dx * dx + dz * dz);
     }
 
-    public static boolean isWithinRange(Location a, Location b, double range) {
-        if (!a.getWorld().equals(b.getWorld())) return false;
-        return a.distanceSquared(b) <= range * range;
-    }
-
     /**
      * Find a safe standing position adjacent to a target block.
      * Checks all 4 cardinal directions for a solid ground block with 2 air blocks above.

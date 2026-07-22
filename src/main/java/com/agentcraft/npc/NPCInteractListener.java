@@ -8,6 +8,7 @@ import com.comphenix.protocol.events.PacketAdapter;
 import com.comphenix.protocol.events.PacketContainer;
 import com.comphenix.protocol.events.PacketEvent;
 import com.comphenix.protocol.wrappers.EnumWrappers;
+import com.comphenix.protocol.wrappers.WrappedEnumEntityUseAction;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
@@ -39,8 +40,12 @@ public class NPCInteractListener {
 
                         if (!tracker.isNPC(entityId)) return;
 
-                        EnumWrappers.EntityUseAction action = packet.getEnumEntityUseActions().read(0).getAction();
-                        if (action != EnumWrappers.EntityUseAction.INTERACT) return;
+                        WrappedEnumEntityUseAction useAction = packet.getEnumEntityUseActions().read(0);
+                        if (useAction.getAction() != EnumWrappers.EntityUseAction.INTERACT) return;
+                        // Vanilla clients send USE_ENTITY INTERACT once per hand
+                        // for a single right-click; only handle the MAIN_HAND
+                        // packet so the handler fires once per click.
+                        if (useAction.getHand() != EnumWrappers.Hand.MAIN_HAND) return;
 
                         FakePlayer npc = tracker.getByEntityId(entityId);
                         Player player = event.getPlayer();

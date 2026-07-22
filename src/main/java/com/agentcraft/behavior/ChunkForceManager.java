@@ -1,7 +1,6 @@
 package com.agentcraft.behavior;
 
 import com.agentcraft.agent.AIAgent;
-import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
 
@@ -17,11 +16,16 @@ public class ChunkForceManager {
     private final boolean enabled;
     private final int radius;
 
-    // Track which chunks each agent is keeping loaded: agentName -> set of packed chunk coords
-    private final Map<String, Set<Long>> agentChunks = new HashMap<>();
+    /** The chunks one agent is keeping loaded, all in a single world. */
+    private record AgentHold(World world, Set<Long> chunks) {}
 
-    // Reference count per chunk so overlapping agents don't unforce each other's chunks
-    private final Map<Long, Integer> chunkRefCounts = new HashMap<>();
+    // Track which chunks each agent is keeping loaded: agentName -> hold
+    private final Map<String, AgentHold> agentChunks = new HashMap<>();
+
+    // Reference count per world and packed chunk coords, so overlapping agents
+    // don't unforce each other's chunks and same-coordinate chunks in
+    // different worlds don't share a refcount entry.
+    private final Map<World, Map<Long, Integer>> chunkRefCounts = new HashMap<>();
 
     public ChunkForceManager(Logger logger, boolean enabled, int radius) {
         this.logger = logger;
@@ -45,12 +49,22 @@ public class ChunkForceManager {
         Set<Long> newChunks = new HashSet<>();
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
-                newChunks.add(packChunk(world, chunkX + dx, chunkZ + dz));
+                newChunks.add(packChunk(chunkX + dx, chunkZ + dz));
             }
         }
 
+        AgentHold oldHold = agentChunks.get(name);
+        if (oldHold != null && !oldHold.world().equals(world)) {
+            // World changed: release everything held in the old world first.
+            for (long packed : oldHold.chunks()) {
+                releaseChunk(oldHold.world(), packed);
+            }
+            oldHold = null;
+        }
+
+        Set<Long> oldChunks = oldHold != null ? oldHold.chunks() : Collections.emptySet();
+
         // Release old chunks that are no longer needed
-        Set<Long> oldChunks = agentChunks.getOrDefault(name, Collections.emptySet());
         for (long packed : oldChunks) {
             if (!newChunks.contains(packed)) {
                 releaseChunk(world, packed);
@@ -64,26 +78,23 @@ public class ChunkForceManager {
             }
         }
 
-        agentChunks.put(name, newChunks);
+        agentChunks.put(name, new AgentHold(world, newChunks));
     }
 
     /**
      * Release all forced chunks for an agent (on despawn).
+     * Each held ticket is released exactly once, against the world it was
+     * acquired in.
      */
     public void releaseAll(String agentName) {
         if (!enabled) return;
 
         String name = agentName.toLowerCase();
-        Set<Long> chunks = agentChunks.remove(name);
-        if (chunks == null) return;
+        AgentHold hold = agentChunks.remove(name);
+        if (hold == null) return;
 
-        // We need the world — find it from any remaining agent or just iterate all worlds
-        for (long packed : chunks) {
-            for (World world : org.bukkit.Bukkit.getWorlds()) {
-                int cx = unpackX(packed);
-                int cz = unpackZ(packed);
-                releaseChunk(world, packed);
-            }
+        for (long packed : hold.chunks()) {
+            releaseChunk(hold.world(), packed);
         }
     }
 
@@ -93,11 +104,11 @@ public class ChunkForceManager {
     public void shutdown() {
         if (!enabled) return;
 
-        for (Map.Entry<Long, Integer> entry : new HashMap<>(chunkRefCounts).entrySet()) {
-            long packed = entry.getKey();
-            int cx = unpackX(packed);
-            int cz = unpackZ(packed);
-            for (World world : org.bukkit.Bukkit.getWorlds()) {
+        for (Map.Entry<World, Map<Long, Integer>> worldEntry : new HashMap<>(chunkRefCounts).entrySet()) {
+            World world = worldEntry.getKey();
+            for (long packed : new ArrayList<>(worldEntry.getValue().keySet())) {
+                int cx = unpackX(packed);
+                int cz = unpackZ(packed);
                 if (world.isChunkForceLoaded(cx, cz)) {
                     world.setChunkForceLoaded(cx, cz, false);
                 }
@@ -108,28 +119,31 @@ public class ChunkForceManager {
     }
 
     private void forceChunk(World world, long packed) {
-        int cx = unpackX(packed);
-        int cz = unpackZ(packed);
-        int refs = chunkRefCounts.getOrDefault(packed, 0);
-        if (refs == 0) {
-            world.setChunkForceLoaded(cx, cz, true);
+        Map<Long, Integer> refs = chunkRefCounts.computeIfAbsent(world, w -> new HashMap<>());
+        int count = refs.getOrDefault(packed, 0);
+        if (count == 0) {
+            world.setChunkForceLoaded(unpackX(packed), unpackZ(packed), true);
         }
-        chunkRefCounts.put(packed, refs + 1);
+        refs.put(packed, count + 1);
     }
 
     private void releaseChunk(World world, long packed) {
-        int refs = chunkRefCounts.getOrDefault(packed, 0);
-        if (refs <= 1) {
-            chunkRefCounts.remove(packed);
-            int cx = unpackX(packed);
-            int cz = unpackZ(packed);
-            world.setChunkForceLoaded(cx, cz, false);
+        Map<Long, Integer> refs = chunkRefCounts.get(world);
+        int count = refs != null ? refs.getOrDefault(packed, 0) : 0;
+        if (count <= 1) {
+            if (refs != null) {
+                refs.remove(packed);
+                if (refs.isEmpty()) {
+                    chunkRefCounts.remove(world);
+                }
+            }
+            world.setChunkForceLoaded(unpackX(packed), unpackZ(packed), false);
         } else {
-            chunkRefCounts.put(packed, refs - 1);
+            refs.put(packed, count - 1);
         }
     }
 
-    private static long packChunk(World world, int cx, int cz) {
+    private static long packChunk(int cx, int cz) {
         return ((long) cx << 32) | (cz & 0xFFFFFFFFL);
     }
 

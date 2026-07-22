@@ -11,6 +11,11 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
 public class ChatListener implements Listener {
 
     private final AgentCraftPlugin plugin;
@@ -28,26 +33,22 @@ public class ChatListener implements Listener {
 
         if (!player.hasPermission("agentcraft.use")) return;
 
+        Map<String, AIAgent> agentsByName = new HashMap<>();
+        List<String> agentNames = new ArrayList<>();
         for (AIAgent agent : AgentManager.getInstance().getAllAgents()) {
-            String agentName = agent.getNpc().getName().toLowerCase();
+            String name = agent.getNpc().getName();
+            agentNames.add(name);
+            agentsByName.put(name, agent);
+        }
 
-            if (!message.toLowerCase().contains(agentName)) continue;
+        for (AgentMentionParser.Mention mention : AgentMentionParser.parseAll(message, agentNames)) {
+            AIAgent agent = agentsByName.get(mention.agentName());
+            if (agent == null) continue;
+            if (mention.task().isEmpty()) continue;
             if (!agent.getNpc().getLocation().getWorld().equals(player.getWorld())) continue;
             if (agent.getNpc().getLocation().distanceSquared(player.getLocation()) > radius * radius) continue;
 
-            // Extract the task (everything after the agent name)
-            String lowerMsg = message.toLowerCase();
-            int nameIdx = lowerMsg.indexOf(agentName);
-            String task = message.substring(nameIdx + agentName.length()).trim();
-
-            // Strip leading punctuation
-            if (!task.isEmpty() && (task.charAt(0) == ',' || task.charAt(0) == ':')) {
-                task = task.substring(1).trim();
-            }
-
-            if (task.isEmpty()) continue;
-
-            final String finalTask = task;
+            final String finalTask = mention.task();
             Bukkit.getScheduler().runTask(plugin, () -> {
                 plugin.getAiIntegration().submitTask(agent, player, finalTask);
                 MessageUtil.send(player, MessageUtil.info("Task sent to " + MessageUtil.highlight(agent.getNpc().getName()) + "."));
